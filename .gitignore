@@ -12,3 +12,20 @@ local.properties
 # Local visual verification artifacts; source image resources stay under app/src.
 /phone-memory-cards.png
 /phone-memory-update.png
+
+# Kotlin / Gradle
+.kotlin/
+*.hprof
+*.log
+captures/
+.metadata/
+
+# Signing
+*.jks
+*.keystore
+keystore.properties
+
+# Misc tooling
+.vscode/
+*.swp
+*~

@@ -1,0 +1,15 @@
+# Normalize text files to LF in the repository.
+* text=auto eol=lf
+
+*.bat        text eol=crlf
+*.png        binary
+*.jpg        binary
+*.jpeg       binary
+*.webp       binary
+*.jar        binary
+*.jks        binary
+*.keystore   binary
+*.apk        binary
+*.aab        binary
+*.ttf        binary
+*.otf        binary
