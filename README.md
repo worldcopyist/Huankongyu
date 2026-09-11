@@ -39,17 +39,23 @@ echo "sdk.dir=$HOME/Library/Android/sdk" > local.properties
 
 首次构建会自动下载 Gradle 与依赖。
 
-## 项目结构（演进中）
+## 项目结构
 
 ```
 app/src/main/java/com/huankongyu/app/
-├── MainActivity.kt      # 入口 + AppViewModel + 全部界面（正在拆分）
-├── ProviderStore.kt     # SQLite 持久化（API Key 经 Android Keystore 加密）
+├── MainActivity.kt      # Activity 入口 + Compose 界面
+├── AppViewModel.kt      # 业务状态与聊天/记忆编排
+├── Models.kt            # 数据模型、枚举与常量
+├── ChatPrompts.kt       # 规划器 / 回复器提示词
+├── ReplySplitter.kt     # 回复分段
+├── OpenAiClient.kt      # OpenAI 兼容 API
+├── McpHttpClient.kt     # Streamable HTTP MCP
+├── WebSearchClient.kt   # 应用内网页查询
+├── DeviceContext.kt     # 时间 / 日历 / 位置上下文
+├── ProviderStore.kt     # SQLite（API Key 经 Keystore 加密）
 ├── AvatarCropView.kt    # 头像圆形裁剪
 └── ui/theme/            # Material3 主题与色板
 ```
-
-> 历史原因核心逻辑集中在 `MainActivity.kt`；后续按 `data / domain / ui` 分层重构。
 
 ## 版本管理约定
 

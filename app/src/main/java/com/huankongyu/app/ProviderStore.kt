@@ -357,25 +357,25 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
         }
     }
 
-    fun saveMessages(messages: List<PersistedChatMessage>) {
-        writableDatabase.beginTransaction()
-        try {
-            writableDatabase.delete("chat_messages", null, null)
-            messages.forEachIndexed { index, persisted ->
-                writableDatabase.insertOrThrow("chat_messages", null, ContentValues().apply {
-                    put("id", persisted.message.id)
-                    put("character_id", persisted.characterId)
-                    put("from_user", if (persisted.message.fromUser) 1 else 0)
-                    put("content", persisted.message.content)
-                    put("message_time", persisted.message.time)
-                    put("created_at", persisted.message.createdAt)
-                    put("sort_order", index)
-                })
-            }
-            writableDatabase.setTransactionSuccessful()
-        } finally {
-            writableDatabase.endTransaction()
-        }
+    /** Appends one chat message without rewriting the entire history table. */
+    fun appendMessage(characterId: String, message: ChatMessage) {
+        val nextOrder = writableDatabase.rawQuery(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM chat_messages WHERE character_id = ?",
+            arrayOf(characterId)
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+        writableDatabase.insertWithOnConflict("chat_messages", null, ContentValues().apply {
+            put("id", message.id)
+            put("character_id", characterId)
+            put("from_user", if (message.fromUser) 1 else 0)
+            put("content", message.content)
+            put("message_time", message.time)
+            put("created_at", message.createdAt)
+            put("sort_order", nextOrder)
+        }, SQLiteDatabase.CONFLICT_REPLACE)
+    }
+
+    fun deleteMessagesForCharacter(characterId: String) {
+        writableDatabase.delete("chat_messages", "character_id = ?", arrayOf(characterId))
     }
 
     fun saveMemory(memory: LongTermMemory, summarizedUntil: Long) = saveMemories(listOf(memory), summarizedUntil)
