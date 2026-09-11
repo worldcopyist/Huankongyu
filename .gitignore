@@ -1,0 +1,14 @@
+*.iml
+.gradle
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+
+# Local visual verification artifacts; source image resources stay under app/src.
+/phone-memory-cards.png
+/phone-memory-update.png
