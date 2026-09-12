@@ -6,7 +6,7 @@ import java.time.format.DateTimeFormatter
 import java.util.UUID
 
 enum class Destination {
-    Home, Chat, CreateCharacter, EditCharacter, CharacterSettings, AvatarCrop, GlobalPrompt, ReplySplitter, Providers, McpServers, Logs, MemoryDetails, MemoryVector
+    Home, Chat, CreateCharacter, EditCharacter, CharacterSettings, AvatarCrop, GlobalPrompt, ReplySplitter, ThemeMode, Providers, McpServers, Logs, MemoryDetails, MemoryVector
 }
 
 enum class HomeTab { Chats, Contacts, Me, Memories }

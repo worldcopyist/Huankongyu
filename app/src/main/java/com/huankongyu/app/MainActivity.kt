@@ -209,6 +209,8 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
         BackHandler(enabled = viewModel.destination != Destination.Home || viewModel.selectedTab != HomeTab.Chats) {
             when {
                 viewModel.destination == Destination.GlobalPrompt -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
+                viewModel.destination == Destination.ReplySplitter -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
+                viewModel.destination == Destination.ThemeMode -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.Providers -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.McpServers -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.Logs -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
@@ -259,9 +261,9 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                             onUserSignatureChange = viewModel::updateUserSignature,
                             onOpenGlobalPrompt = { viewModel.destination = Destination.GlobalPrompt },
                             onOpenReplySplitter = { viewModel.destination = Destination.ReplySplitter },
+                            onOpenThemeMode = { viewModel.destination = Destination.ThemeMode },
                             onOpenMcpServers = { viewModel.destination = Destination.McpServers },
                             onOpenLogs = viewModel::openLogs,
-                            onThemeModeChange = viewModel::applyThemeMode,
                             hasSystemPermissions = hasSystemPermissions,
                             onRequestSystemPermissions = requestSystemPermissions,
                             onOpenProviders = { viewModel.destination = Destination.Providers },
@@ -354,6 +356,15 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                         onBack = { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me },
                         onSave = {
                             viewModel.updateReplySplitterSettings(it)
+                            viewModel.destination = Destination.Home
+                            viewModel.selectedTab = HomeTab.Me
+                        }
+                    )
+                    Destination.ThemeMode -> ThemeModeSettingsScreen(
+                        selected = viewModel.themeMode,
+                        onBack = { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me },
+                        onSelect = { mode ->
+                            viewModel.applyThemeMode(mode)
                             viewModel.destination = Destination.Home
                             viewModel.selectedTab = HomeTab.Me
                         }
@@ -822,9 +833,9 @@ private fun SettingsScreen(
     onUserSignatureChange: (String) -> Unit,
     onOpenGlobalPrompt: () -> Unit,
     onOpenReplySplitter: () -> Unit,
+    onOpenThemeMode: () -> Unit,
     onOpenMcpServers: () -> Unit,
     onOpenLogs: () -> Unit,
-    onThemeModeChange: (ThemeMode) -> Unit,
     hasSystemPermissions: Boolean,
     onRequestSystemPermissions: () -> Unit,
     onOpenProviders: () -> Unit,
@@ -851,30 +862,27 @@ private fun SettingsScreen(
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenMcpServers)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("外部 MCP 工具", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(if (mcpServers.isEmpty()) "添加可信任的 HTTP MCP 服务" else "${mcpServers.count { it.enabled }} 个已启用，${mcpServers.sumOf { it.tools.size }} 个工具", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenLogs)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("开发日志", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text("查看运行、模型、规划、回复及错误警告记录", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
             item {
-                Card(shape = RoundedCornerShape(16.dp), colors = cardColors) {
-                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-                        Text("外观主题", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                        Text(
-                            when (themeMode) {
-                                ThemeMode.Light -> "始终使用浅色界面"
-                                ThemeMode.Dark -> "始终使用深色界面"
-                                ThemeMode.System -> "自动跟随系统深浅色设置"
-                            },
-                            color = IslandMuted,
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                        Spacer(Modifier.height(10.dp))
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            ThemeMode.entries.forEach { option ->
-                                val selected = themeMode == option
-                                OutlinedButton(
-                                    onClick = { onThemeModeChange(option) },
-                                    modifier = Modifier.weight(1f)
-                                ) {
-                                    Text(if (selected) "✓ ${option.label}" else option.label)
-                                }
-                            }
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = cardColors,
+                    modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenThemeMode)
+                ) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("外观主题", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                when (themeMode) {
+                                    ThemeMode.Light -> "浅色"
+                                    ThemeMode.Dark -> "深色"
+                                    ThemeMode.System -> "跟随系统"
+                                },
+                                color = IslandMuted,
+                                style = MaterialTheme.typography.bodySmall,
+                                maxLines = 1,
+                                softWrap = false
+                            )
                         }
+                        Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue)
                     }
                 }
             }
@@ -1086,6 +1094,70 @@ private fun ReplySplitterSettingsScreen(settings: ReplySplitterSettings, onBack:
             enabled = isValid,
             modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
         ) { Text("保存分段器设置") }
+    }
+}
+
+@Composable
+private fun ThemeModeSettingsScreen(
+    selected: ThemeMode,
+    onBack: () -> Unit,
+    onSelect: (ThemeMode) -> Unit
+) {
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = onBack) { Text("‹ 返回") }
+            Text("外观主题", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        }
+        HorizontalDivider(color = IslandBlue.copy(alpha = 0.16f))
+        Text(
+            "选择界面深浅色。跟随系统时会自动匹配手机当前的主题设置。",
+            color = IslandMuted,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp)
+        )
+        ThemeMode.entries.forEach { option ->
+            val isSelected = selected == option
+            Card(
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = if (isSelected) IslandBlue.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant
+                ),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 20.dp, vertical = 6.dp)
+                    .clickable { onSelect(option) }
+            ) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        if (isSelected) "✓ ${option.label}" else option.label,
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (isSelected) IslandBlue else MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        softWrap = false,
+                        overflow = TextOverflow.Visible,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text(
+                        when (option) {
+                            ThemeMode.Light -> "始终浅色"
+                            ThemeMode.Dark -> "始终深色"
+                            ThemeMode.System -> "与手机一致"
+                        },
+                        color = IslandMuted,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1,
+                        softWrap = false
+                    )
+                }
+            }
+        }
     }
 }
 
