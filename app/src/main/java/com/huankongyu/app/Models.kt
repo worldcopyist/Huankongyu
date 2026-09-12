@@ -11,7 +11,11 @@ enum class Destination {
 
 enum class HomeTab { Chats, Contacts, Me, Memories }
 
-enum class ThemeMode { Light, Dark }
+enum class ThemeMode(val label: String) {
+    Light("浅色"),
+    Dark("深色"),
+    System("跟随系统")
+}
 
 const val DEFAULT_USER_SIGNATURE = "你的 AI 陪伴空间"
 const val MAX_USER_SIGNATURE_LENGTH = 18

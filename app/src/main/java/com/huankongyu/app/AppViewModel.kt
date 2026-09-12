@@ -85,7 +85,7 @@ class AppViewModel : ViewModel() {
     var selectedTab by mutableStateOf(HomeTab.Chats)
     var animateChatEntrance by mutableStateOf(false)
     var chatExitRequested by mutableStateOf(false)
-    var themeMode by mutableStateOf(ThemeMode.Dark)
+    var themeMode by mutableStateOf(ThemeMode.System)
     var userName by mutableStateOf("我")
     var userSignature by mutableStateOf(DEFAULT_USER_SIGNATURE)
     var globalChatPrompt by mutableStateOf(COMMON_CHAT_PROMPT)

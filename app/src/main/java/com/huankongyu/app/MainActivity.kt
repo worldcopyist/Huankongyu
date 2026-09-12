@@ -30,6 +30,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -186,7 +187,12 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
         if (ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED) launchCharacterAvatarPicker() else characterImagePermissionLauncher.launch(permission)
     }
 
-    val darkTheme = viewModel.themeMode == ThemeMode.Dark
+    val systemInDarkTheme = isSystemInDarkTheme()
+    val darkTheme = when (viewModel.themeMode) {
+        ThemeMode.Dark -> true
+        ThemeMode.Light -> false
+        ThemeMode.System -> systemInDarkTheme
+    }
     val navigationSurface = if (darkTheme) NavigationSurfaceDark else NavigationSurfaceLight
     val hasSystemPermissions = permissionStateVersion.let { missingSystemPermissions(context).isEmpty() }
     HuankongyuTheme(darkTheme = darkTheme) {
@@ -245,7 +251,7 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                             userName = viewModel.userName,
                             userSignature = viewModel.userSignature,
                             userAvatarUri = viewModel.userAvatarUri,
-                            darkMode = viewModel.themeMode == ThemeMode.Dark,
+                            themeMode = viewModel.themeMode,
                             replySplitterSettings = viewModel.replySplitterSettings,
                             mcpServers = viewModel.mcpServers,
                             onEditAvatar = openAvatarPicker,
@@ -255,7 +261,7 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                             onOpenReplySplitter = { viewModel.destination = Destination.ReplySplitter },
                             onOpenMcpServers = { viewModel.destination = Destination.McpServers },
                             onOpenLogs = viewModel::openLogs,
-                            onDarkModeChange = { enabled -> viewModel.applyThemeMode(if (enabled) ThemeMode.Dark else ThemeMode.Light) },
+                            onThemeModeChange = viewModel::applyThemeMode,
                             hasSystemPermissions = hasSystemPermissions,
                             onRequestSystemPermissions = requestSystemPermissions,
                             onOpenProviders = { viewModel.destination = Destination.Providers },
@@ -808,7 +814,7 @@ private fun SettingsScreen(
     userName: String,
     userSignature: String,
     userAvatarUri: String?,
-    darkMode: Boolean,
+    themeMode: ThemeMode,
     replySplitterSettings: ReplySplitterSettings,
     mcpServers: List<McpServer>,
     onEditAvatar: () -> Unit,
@@ -818,7 +824,7 @@ private fun SettingsScreen(
     onOpenReplySplitter: () -> Unit,
     onOpenMcpServers: () -> Unit,
     onOpenLogs: () -> Unit,
-    onDarkModeChange: (Boolean) -> Unit,
+    onThemeModeChange: (ThemeMode) -> Unit,
     hasSystemPermissions: Boolean,
     onRequestSystemPermissions: () -> Unit,
     onOpenProviders: () -> Unit,
@@ -829,7 +835,9 @@ private fun SettingsScreen(
     onTestModelConnectivity: (String, String) -> Unit
 ) {
     var pickerType by remember { mutableStateOf<ModelType?>(null) }
-    val settingsCardColor = if (darkMode) Color(0xFF17202E) else Color(0xFFF0F3F8)
+    val isDarkNow = themeMode == ThemeMode.Dark ||
+        (themeMode == ThemeMode.System && isSystemInDarkTheme())
+    val settingsCardColor = if (isDarkNow) Color(0xFF17202E) else Color(0xFFF0F3F8)
     val cardColors = CardDefaults.cardColors(containerColor = settingsCardColor)
     Column(Modifier.fillMaxSize()) {
         CompactHeader("我")
@@ -842,7 +850,34 @@ private fun SettingsScreen(
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenReplySplitter)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("回复分段器", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text("${replySplitterSettings.mode.label} · 最多 ${replySplitterSettings.maxSegments} 条 · 每条 ${replySplitterSettings.minSegmentLength}-${replySplitterSettings.maxSegmentLength} 字", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenMcpServers)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("外部 MCP 工具", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(if (mcpServers.isEmpty()) "添加可信任的 HTTP MCP 服务" else "${mcpServers.count { it.enabled }} 个已启用，${mcpServers.sumOf { it.tools.size }} 个工具", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenLogs)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("开发日志", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text("查看运行、模型、规划、回复及错误警告记录", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
-            item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors) { Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) { Column { Text("深色模式", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(if (darkMode) "已启用深色界面" else "已启用浅色界面", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Switch(checked = darkMode, onCheckedChange = onDarkModeChange) } } }
+            item {
+                Card(shape = RoundedCornerShape(16.dp), colors = cardColors) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
+                        Text("外观主题", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            when (themeMode) {
+                                ThemeMode.Light -> "始终使用浅色界面"
+                                ThemeMode.Dark -> "始终使用深色界面"
+                                ThemeMode.System -> "自动跟随系统深浅色设置"
+                            },
+                            color = IslandMuted,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.height(10.dp))
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ThemeMode.entries.forEach { option ->
+                                val selected = themeMode == option
+                                OutlinedButton(
+                                    onClick = { onThemeModeChange(option) },
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Text(if (selected) "✓ ${option.label}" else option.label)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors) { Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("系统权限", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(if (hasSystemPermissions) "日历、位置和通知已授权" else "允许读取日历、位置并发送通知", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; TextButton(onClick = onRequestSystemPermissions, enabled = !hasSystemPermissions) { Text(if (hasSystemPermissions) "已授权" else "去授权") } } } }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenProviders)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("模型提供商", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(activeProvider?.let { "当前：${it.name} · 已导入 ${it.models.size} 个模型" } ?: "添加、切换与导入模型列表", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
             item { Text("模型配置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp)) }
