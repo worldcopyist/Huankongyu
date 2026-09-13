@@ -6,6 +6,22 @@ import java.net.URLEncoder
 import org.json.JSONArray
 import org.json.JSONObject
 
+/** Sampling knobs for OpenAI-compatible chat completions. */
+internal data class ChatSampling(
+    val temperature: Float? = null,
+    val topP: Float? = null,
+    val maxTokens: Int? = null
+)
+
+/** Planner: tighter sampling so decisions stay structured. */
+internal fun plannerSampling() = ChatSampling(temperature = 0.2f, topP = 0.9f, maxTokens = 512)
+
+/** Reply: more natural variation for companion dialogue. */
+internal fun replySampling() = ChatSampling(temperature = 0.85f, topP = 0.95f, maxTokens = 1024)
+
+/** Memory summarizer: factual, low variance. */
+internal fun memorySampling() = ChatSampling(temperature = 0.3f, topP = 0.9f, maxTokens = 1024)
+
 /** OpenAI-compatible HTTP helpers shared by chat, embeddings, and model management. */
 internal object OpenAiClient {
     fun fetchModels(endpoint: String, apiKey: String): List<String> {
@@ -52,24 +68,41 @@ internal object OpenAiClient {
         }
     }
 
-    fun requestCompletion(provider: ApiProvider, model: String, messages: JSONArray): String {
-        val payload = JSONObject().apply {
-            put("model", model)
-            put("messages", messages)
-        }
-        val connection = (URL(provider.endpoint.trimEnd('/') + "/chat/completions").openConnection() as HttpURLConnection).apply {
+    private fun buildChatPayload(
+        model: String,
+        messages: JSONArray,
+        sampling: ChatSampling?,
+        stream: Boolean
+    ): JSONObject = JSONObject().apply {
+        put("model", model)
+        put("messages", messages)
+        sampling?.temperature?.let { put("temperature", it.toDouble()) }
+        sampling?.topP?.let { put("top_p", it.toDouble()) }
+        sampling?.maxTokens?.let { put("max_tokens", it) }
+        if (stream) put("stream", true)
+    }
+
+    private fun openChatConnection(provider: ApiProvider, payload: JSONObject): HttpURLConnection {
+        return (URL(provider.endpoint.trimEnd('/') + "/chat/completions").openConnection() as HttpURLConnection).apply {
             requestMethod = "POST"
             connectTimeout = 15_000
-            readTimeout = 60_000
+            readTimeout = 90_000
             doOutput = true
             setRequestProperty("Accept", "application/json")
             setRequestProperty("Content-Type", "application/json; charset=utf-8")
             if (provider.apiKey.isNotBlank()) setRequestProperty("Authorization", "Bearer ${provider.apiKey}")
+            outputStream.use { output -> output.write(payload.toString().toByteArray(Charsets.UTF_8)) }
         }
+    }
+
+    fun requestCompletion(
+        provider: ApiProvider,
+        model: String,
+        messages: JSONArray,
+        sampling: ChatSampling? = null
+    ): String {
+        val connection = openChatConnection(provider, buildChatPayload(model, messages, sampling, stream = false))
         return try {
-            connection.outputStream.use { output ->
-                output.write(payload.toString().toByteArray(Charsets.UTF_8))
-            }
             val responseCode = connection.responseCode
             val body = (if (responseCode in 200..299) connection.inputStream else connection.errorStream)
                 ?.bufferedReader()?.use { it.readText() }.orEmpty()
@@ -77,6 +110,57 @@ internal object OpenAiClient {
             val message = JSONObject(body).optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
                 ?: error("返回中没有 choices[0].message")
             message.optString("content").trim().ifBlank { error("模型没有返回可显示的文本") }
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    /**
+     * Streams chat completion deltas via SSE (`data: {...}`).
+     * [onDelta] receives each text fragment; returns the full assembled text.
+     */
+    fun requestCompletionStream(
+        provider: ApiProvider,
+        model: String,
+        messages: JSONArray,
+        sampling: ChatSampling? = null,
+        onDelta: (String) -> Unit
+    ): String {
+        val connection = openChatConnection(provider, buildChatPayload(model, messages, sampling, stream = true))
+        return try {
+            val responseCode = connection.responseCode
+            if (responseCode !in 200..299) {
+                val err = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                error("服务商返回 $responseCode：${err.take(160)}")
+            }
+            val full = StringBuilder()
+            connection.inputStream?.bufferedReader()?.use { reader ->
+                var line = reader.readLine()
+                while (line != null) {
+                    if (Thread.currentThread().isInterrupted) error("请求已取消")
+                    val trimmed = line.trim()
+                    if (trimmed.startsWith("data:")) {
+                        val data = trimmed.removePrefix("data:").trim()
+                        if (data == "[DONE]") break
+                        if (data.isNotEmpty()) {
+                            val delta = runCatching {
+                                JSONObject(data)
+                                    .optJSONArray("choices")
+                                    ?.optJSONObject(0)
+                                    ?.optJSONObject("delta")
+                                    ?.optString("content")
+                                    .orEmpty()
+                            }.getOrDefault("")
+                            if (delta.isNotEmpty()) {
+                                full.append(delta)
+                                onDelta(delta)
+                            }
+                        }
+                    }
+                    line = reader.readLine()
+                }
+            }
+            full.toString().trim().ifBlank { error("模型没有返回可显示的文本") }
         } finally {
             connection.disconnect()
         }

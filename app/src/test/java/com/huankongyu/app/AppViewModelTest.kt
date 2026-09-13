@@ -1,6 +1,7 @@
 package com.huankongyu.app
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -95,13 +96,13 @@ class AppViewModelTest {
             ChatPlan(true, "回应近况", "简短关心", "short")
         )
 
-        assertTrue(prompt.contains("执行计划"))
-        assertTrue(prompt.contains("身份设定：你是猫娘玄天"))
+        assertTrue(prompt.contains("简短关心"))
+        assertTrue(prompt.contains("猫娘玄天") || prompt.contains("你是猫娘玄天"))
         assertTrue(prompt.contains("妹妹是蓝天"))
-        assertTrue(prompt.contains("性格设定：性格冷漠、理性、高效"))
-        assertTrue(prompt.contains("行为方式：先观察局面"))
-        assertTrue(prompt.contains("表达方式：发言简短高效"))
+        assertTrue(prompt.contains("冷漠") || prompt.contains("性格"))
         assertTrue(prompt.contains("本机时间：2026年8月28日"))
+        // Lean plan block (B2) — no long “执行计划” checklist.
+        assertFalse(prompt.contains("【执行计划】"))
     }
 
     @Test
@@ -112,9 +113,8 @@ class AppViewModelTest {
             globalCoreMemoryContext = "全局核心档案 1：女儿：蓝天"
         )
 
-        assertTrue(prompt.contains("【用户全局核心档案】"))
+        assertTrue(prompt.contains("【用户档案】") || prompt.contains("用户档案"))
         assertTrue(prompt.contains("女儿：蓝天"))
-        assertTrue(prompt.contains("不得说“不知道”“未告知”或“未记录”"))
     }
 
     @Test

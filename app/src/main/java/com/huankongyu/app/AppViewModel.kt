@@ -21,11 +21,13 @@ import kotlin.math.exp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.huankongyu.app.shizuku.ShizukuClient
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -92,20 +94,10 @@ class AppViewModel : ViewModel() {
     var globalPromptSections by mutableStateOf(defaultGlobalPromptSections())
     var replySplitterSettings by mutableStateOf(ReplySplitterSettings())
     var userAvatarUri by mutableStateOf<String?>(null)
-    var characterAvatarCropRequest by mutableStateOf<CharacterAvatarCropRequest?>(null)
+    var avatarCropRequest by mutableStateOf<AvatarCropRequest?>(null)
     val mcpServers = mutableStateListOf<McpServer>()
     var selectedCharacterId by mutableStateOf("lan")
-    val characters = mutableStateListOf(
-        Character(
-            "lan",
-            "澜",
-            "安静的陪伴者",
-            "温柔、敏锐、会认真听你说话",
-            Color(0xFF3A79F7),
-            "今天想从哪里开始聊？",
-            "现在"
-        )
-    )
+    val characters = mutableStateListOf(lanCharacter())
     private val threads =
         mutableStateMapOf<String, androidx.compose.runtime.snapshots.SnapshotStateList<ChatMessage>>()
     val apiProviders = mutableStateListOf<ApiProvider>()
@@ -114,9 +106,19 @@ class AppViewModel : ViewModel() {
     var connectionTestState by mutableStateOf<ConnectionTestState>(ConnectionTestState.Idle)
     var modelNameCheckState by mutableStateOf<ModelNameCheckState>(ModelNameCheckState.Idle)
     var modelConnectionTestState by mutableStateOf<ModelConnectionTestState>(ModelConnectionTestState.Idle)
+    val shizukuState get() = ShizukuClient.state
+    val shizukuStatusDetail get() = ShizukuClient.statusDetail()
+    val shizukuLastError get() = ShizukuClient.lastError
+    val shizukuServerVersion get() = ShizukuClient.serverVersion
+    val shizukuPrivilegeUid get() = ShizukuClient.privilegeUid
+    var shizukuTestResult by mutableStateOf<String?>(null)
+    var isShizukuTesting by mutableStateOf(false)
     var isChatResponding by mutableStateOf(false)
     var chatStatus by mutableStateOf<String?>(null)
     var chatError by mutableStateOf<String?>(null)
+    /** Live stream buffer while the reply model is generating. */
+    var chatStreamingText by mutableStateOf<String?>(null)
+    private var chatJob: Job? = null
     val recentLogs = mutableStateListOf<AppLogEntry>()
     val longTermMemories = mutableStateListOf<LongTermMemory>()
     var selectedMemoryScope by mutableStateOf<String?>(null)
@@ -276,6 +278,7 @@ class AppViewModel : ViewModel() {
     }
 
     fun requestChatExit() {
+        cancelChat()
         if (destination == Destination.Chat) chatExitRequested = true
     }
 
@@ -396,6 +399,14 @@ class AppViewModel : ViewModel() {
         characters.clear(); characters.addAll(sorted)
     }
 
+    /** Cancels the in-flight planner/reply pipeline for the current chat. */
+    fun cancelChat() {
+        val job = chatJob ?: return
+        if (!job.isActive) return
+        job.cancel()
+        recordLog("已取消当前对话请求")
+    }
+
     fun sendMessage(content: String) {
         val value = content.trim()
         if (value.isEmpty()) return
@@ -437,22 +448,32 @@ class AppViewModel : ViewModel() {
 
         val character = characters.firstOrNull { it.id == characterId } ?: return
         val conversation = thread.toList()
+        // Cancel any in-flight plan/reply so a new message always wins (A2).
+        chatJob?.cancel()
         isChatResponding = true
         chatStatus = "正在规划回应…"
         chatError = null
+        chatStreamingText = null
         val plannerPrompt = globalChatPrompt
         val activeSplitterSettings = replySplitterSettings
         val enabledMcpServers = mcpServers.filter { it.enabled }.map { it.copy() }
         recordLog("开始规划角色回复")
-        providerScope.launch {
+        chatJob = providerScope.launch {
             val startedAt = System.currentTimeMillis()
             var stage = "规划"
             val result = try {
-                val deviceContext = appContext?.let { buildLiveDeviceContext(it) } ?: "设备实时上下文暂不可用。"
-                val plan = requestChatPlan(
-                    provider, chatModel, character, conversation, userName, deviceContext, plannerPrompt,
-                    enabledMcpServers.flatMap { it.tools }
-                )
+                val deviceHints = ChatAgent.deviceContextHint(value)
+                val deviceContext = appContext?.let { buildLiveDeviceContext(it, deviceHints) }
+                    ?: "设备实时上下文暂不可用。"
+                val plan = if (shouldSkipPlanner(value)) {
+                    recordLog("短消息跳过规划器，直接回复")
+                    defaultDirectPlan()
+                } else {
+                    requestChatPlan(
+                        provider, chatModel, character, conversation, userName, deviceContext, plannerPrompt,
+                        enabledMcpServers.flatMap { it.tools }
+                    )
+                }
                 val lengthLabel = when (plan.targetLength) {
                     "short" -> "简短"; "long" -> "较长"; else -> "适中"
                 }
@@ -540,37 +561,98 @@ class AppViewModel : ViewModel() {
                         roleCoreMemories.takeIf { it.isNotEmpty() }?.let(::formatMemoryContext)
                     }
                     stage = "回复生成"
-                    withContext(Dispatchers.Main) { chatStatus = "正在生成回复…" }
-                    recordLog("开始生成角色回复")
+                    withContext(Dispatchers.Main) {
+                        chatStatus = "正在生成回复…"
+                        chatStreamingText = ""
+                    }
+                    recordLog("开始生成角色回复（流式）")
                     Result.success(
-                        requestChatReply(
+                        requestChatReplyStream(
                             provider, chatModel, character, conversation, userName, deviceContext, plan,
                             activeSplitterSettings, webSearchContext, mcpToolContext, globalCoreMemoryContext, memoryContext
-                        )
+                        ) { chunk ->
+                            // Frequent main-thread posts keep the bubble in sync with SSE.
+                            providerScope.launch(Dispatchers.Main) {
+                                chatStreamingText = (chatStreamingText.orEmpty() + chunk)
+                            }
+                        }
                     )
                 }
+            } catch (cancellation: kotlinx.coroutines.CancellationException) {
+                withContext(NonCancellable) {
+                    isChatResponding = false
+                    chatStatus = null
+                    chatStreamingText = null
+                }
+                throw cancellation
             } catch (error: Throwable) {
                 Result.failure(error)
             }
-            val reply = result.getOrNull()
+            // A8: one automatic retry on network-class failures, then an in-character fallback.
+            val networkFailure = result.exceptionOrNull()?.let { err ->
+                err is java.net.SocketTimeoutException ||
+                    err is java.net.ConnectException ||
+                    err is java.net.UnknownHostException
+            } == true
+            val reply = if (networkFailure && stage == "回复生成") {
+                recordLog("网络类失败，自动重试一次回复", AppLogLevel.Warning)
+                delay(600)
+                runCatching {
+                    val deviceContext = appContext?.let {
+                        buildLiveDeviceContext(it, ChatAgent.deviceContextHint(value))
+                    } ?: "设备实时上下文暂不可用。"
+                    val plan = defaultDirectPlan()
+                    requestChatReply(
+                        provider, chatModel, character, conversation, userName, deviceContext, plan,
+                        activeSplitterSettings, null, null, null, null
+                    )
+                }.getOrElse {
+                    recordLog("重试仍失败，使用离线回退文案", AppLogLevel.Warning)
+                    ChatAgent.offlineFallbackReply(character.name)
+                }
+            } else {
+                result.getOrNull()
+            }
             when {
-                result.isFailure -> {
+                result.isFailure && reply == null -> {
                     val error = result.exceptionOrNull() ?: IllegalStateException("未知错误")
                     val reason = friendlyChatError(provider.endpoint, error)
                     recordLog("$stage 失败：$reason", AppLogLevel.Error)
                     withContext(Dispatchers.Main) {
                         isChatResponding = false
                         chatStatus = null
+                        chatStreamingText = null
                         chatError = "回复失败：$reason"
                     }
                 }
                 reply == null -> withContext(Dispatchers.Main) {
                     isChatResponding = false
                     chatStatus = null
+                    chatStreamingText = null
                 }
                 else -> {
-                    val segments = splitAssistantReply(reply, activeSplitterSettings)
+                    var finalReply: String = reply
+                    // B6: one soft rewrite when the model breaks character.
+                    if (ChatAgent.looksOutOfCharacter(finalReply)) {
+                        recordLog("检测到可能出戏，尝试按角色口吻重写一次", AppLogLevel.Warning)
+                        runCatching {
+                            val rewriteMessages = JSONArray().apply {
+                                put(JSONObject().apply {
+                                    put("role", "system")
+                                    put("content", ChatAgent.buildDehumanizeRewritePrompt(finalReply, character))
+                                })
+                            }
+                            val rewritten = OpenAiClient.requestCompletion(
+                                provider, chatModel, rewriteMessages, replySampling()
+                            ).trim()
+                            if (rewritten.isNotBlank()) finalReply = rewritten
+                        }.onFailure {
+                            recordLog("出戏重写失败，使用原文：${it.message?.take(60)}", AppLogLevel.Warning)
+                        }
+                    }
+                    val segments = splitAssistantReply(finalReply, activeSplitterSettings)
                     if (segments.size > 1) recordLog("角色回复已分为 ${segments.size} 条消息发送")
+                    withContext(Dispatchers.Main) { chatStreamingText = null }
                     segments.forEachIndexed { index, segment ->
                         withContext(Dispatchers.Main) {
                             chatStatus = if (segments.size > 1) "正在发送第 ${index + 1} 条消息…" else "正在发送回复…"
@@ -581,6 +663,7 @@ class AppViewModel : ViewModel() {
                     withContext(Dispatchers.Main) {
                         isChatResponding = false
                         chatStatus = null
+                        chatStreamingText = null
                     }
                     recordLog("已发送角色回复：${segments.size} 条，耗时 ${System.currentTimeMillis() - startedAt} 毫秒")
                 }
@@ -732,6 +815,8 @@ class AppViewModel : ViewModel() {
         appContext = context.applicationContext
         val store = ProviderStore(context.applicationContext)
         providerStore = store
+        ShizukuClient.attach(context.applicationContext)
+        recordLog("Shizuku 状态：${ShizukuClient.statusLabel()} · ${ShizukuClient.statusDetail()}")
         providerScope.launch {
             val loaded = runCatching { store.load() }
             loaded.onFailure { error ->
@@ -777,6 +862,25 @@ class AppViewModel : ViewModel() {
                                 pinned = existing.pinned
                             )
                             characterDataChanged = true
+                        }
+                    }
+                    // Upgrade legacy “澜” cards that only had a one-line trait (B3).
+                    val lanIndex = restoredCharacters.indexOfFirst { it.id == "lan" }
+                    if (lanIndex >= 0) {
+                        val lan = restoredCharacters[lanIndex]
+                        if (lan.identity.isBlank() || lan.replyStyle.isBlank() || lan.exampleDialogues.isBlank()) {
+                            restoredCharacters[lanIndex] = lanCharacter().copy(
+                                id = lan.id,
+                                name = lan.name,
+                                color = lan.color,
+                                preview = lan.preview,
+                                time = lan.time,
+                                pinned = lan.pinned,
+                                avatarUri = lan.avatarUri,
+                                relationship = lan.relationship.ifBlank { "安静的陪伴者" }
+                            )
+                            characterDataChanged = true
+                            recordLog("已补全内置角色「澜」的人格卡与范例口吻")
                         }
                     }
                     if (characterDataChanged) store.saveCharacters(restoredCharacters)
@@ -965,25 +1069,89 @@ class AppViewModel : ViewModel() {
     }
 
     /** Copies the chosen picture into app-private storage, so it stays available after restart. */
-    fun importUserAvatar(context: Context, sourceUri: Uri) {
-        val store = providerStore ?: return
+    fun beginUserAvatarCrop(sourceUri: Uri) {
+        val context = appContext ?: return
         providerScope.launch {
-            val savedUri = runCatching {
-                val destination = File(context.filesDir, "user_avatar.png")
+            val localUri = runCatching {
+                val cacheFile = File(context.cacheDir, "user_avatar_pick_${System.currentTimeMillis()}.img")
                 context.contentResolver.openInputStream(sourceUri)?.use { input ->
-                    destination.outputStream().use { output -> input.copyTo(output) }
+                    cacheFile.outputStream().use { output -> input.copyTo(output) }
                 } ?: error("无法读取所选图片")
-                Uri.fromFile(destination).toString()
-            }.getOrNull() ?: return@launch
-            store.saveAvatarUri(savedUri)
-            withContext(Dispatchers.Main) { userAvatarUri = savedUri }
+                if (cacheFile.length() <= 0L) error("所选图片内容为空")
+                Uri.fromFile(cacheFile).toString()
+            }.getOrElse {
+                recordLog("读取相册图片失败：${it.message?.take(80) ?: "未知错误"}", AppLogLevel.Error)
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                avatarCropRequest = AvatarCropRequest(characterId = null, sourceUri = localUri)
+                destination = Destination.AvatarCrop
+            }
         }
     }
 
     fun beginCharacterAvatarCrop(characterId: String, sourceUri: Uri) {
         if (characters.none { it.id == characterId }) return
-        characterAvatarCropRequest = CharacterAvatarCropRequest(characterId, sourceUri.toString())
-        destination = Destination.AvatarCrop
+        val context = appContext
+        if (context == null) {
+            avatarCropRequest = AvatarCropRequest(characterId, sourceUri.toString())
+            destination = Destination.AvatarCrop
+            return
+        }
+        // Copy into cache first: ACTION_PICK grants are temporary and may not survive
+        // into the crop screen on some OEM ROMs (especially custom-album URIs).
+        providerScope.launch {
+            val localUri = runCatching {
+                val cacheFile = File(context.cacheDir, "avatar_pick_${characterId}_${System.currentTimeMillis()}.img")
+                context.contentResolver.openInputStream(sourceUri)?.use { input ->
+                    cacheFile.outputStream().use { output -> input.copyTo(output) }
+                } ?: error("无法读取所选图片")
+                if (cacheFile.length() <= 0L) error("所选图片内容为空")
+                Uri.fromFile(cacheFile).toString()
+            }.getOrElse {
+                recordLog("读取相册图片失败：${it.message?.take(80) ?: "未知错误"}", AppLogLevel.Error)
+                return@launch
+            }
+            withContext(Dispatchers.Main) {
+                avatarCropRequest = AvatarCropRequest(characterId, localUri)
+                destination = Destination.AvatarCrop
+            }
+        }
+    }
+
+    fun cancelAvatarCrop() {
+        val request = avatarCropRequest
+        avatarCropRequest = null
+        if (request?.characterId != null) {
+            destination = Destination.CharacterSettings
+        } else {
+            destination = Destination.Home
+            selectedTab = HomeTab.Me
+        }
+    }
+
+    fun saveCroppedUserAvatar(context: Context, bitmap: Bitmap) {
+        val store = providerStore ?: return
+        providerScope.launch {
+            val savedUri = runCatching {
+                val destination = File(context.filesDir, "user_avatar.png")
+                destination.outputStream().use { output ->
+                    if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) error("无法保存裁剪后的头像")
+                }
+                Uri.fromFile(destination).toString()
+            }.getOrElse {
+                recordLog("用户头像保存失败：${it.message?.take(80) ?: "未知错误"}", AppLogLevel.Error)
+                return@launch
+            }
+            store.saveAvatarUri(savedUri)
+            withContext(Dispatchers.Main) {
+                userAvatarUri = savedUri
+                avatarCropRequest = null
+                destination = Destination.Home
+                selectedTab = HomeTab.Me
+                recordLog("已裁剪并更新用户头像")
+            }
+        }
     }
 
     fun saveCroppedCharacterAvatar(context: Context, characterId: String, bitmap: Bitmap) {
@@ -1004,7 +1172,7 @@ class AppViewModel : ViewModel() {
                 if (index >= 0) {
                     characters[index] = characters[index].copy(avatarUri = savedUri)
                     persistCharacters()
-                    characterAvatarCropRequest = null
+                    avatarCropRequest = null
                     destination = Destination.CharacterSettings
                     recordLog("已裁剪并更新角色头像：${character.name}")
                 }
@@ -1286,7 +1454,7 @@ $conversationJson
         val raw = OpenAiClient.requestCompletion(provider, model, JSONArray().apply {
             put(JSONObject().apply { put("role", "system"); put("content", "你负责准确、克制地总结对话长期记忆。") })
             put(JSONObject().apply { put("role", "user"); put("content", prompt) })
-        })
+        }, memorySampling())
         return parseMemoryDrafts(raw, character, messages)
     }
 
@@ -1420,14 +1588,66 @@ $conversationJson
                     )
                 )
             })
-            conversation.takeLast(20).forEach { message ->
+            conversation.takeLast(12).forEach { message ->
                 put(JSONObject().apply {
                     put("role", if (message.fromUser) "user" else "assistant")
-                    put("content", message.content)
+                    put("content", message.content.take(400))
                 })
             }
         }
-        return parseChatPlan(OpenAiClient.requestCompletion(provider, model, messages))
+        return parseChatPlanWithFallback(provider, model, messages)
+    }
+
+    /** Keeps recent history under a character budget for the reply stage. */
+    private fun trimConversationForReply(
+        conversation: List<ChatMessage>,
+        maxChars: Int = 4_000,
+        maxMessages: Int = 24
+    ): List<ChatMessage> {
+        val recent = conversation.takeLast(maxMessages)
+        var budget = maxChars
+        val kept = ArrayDeque<ChatMessage>()
+        for (message in recent.asReversed()) {
+            val cost = message.content.length + 8
+            if (cost > budget && kept.isNotEmpty()) break
+            kept.addFirst(message)
+            budget -= cost
+        }
+        return kept.toList()
+    }
+
+    /** Short casual turns skip the planner and go straight to a default plan. */
+    private fun shouldSkipPlanner(userMessage: String): Boolean {
+        val value = userMessage.trim()
+        if (value.isEmpty() || value.length > 48) return false
+        if (value.contains('?') || value.contains('？')) return false
+        val probe = listOf("查", "搜", "帮我", "天气", "新闻", "日历", "日程", "搜索")
+        if (probe.any { value.contains(it) }) return false
+        return true
+    }
+
+    private fun defaultDirectPlan() = ChatPlan(
+        shouldReply = true,
+        replyFocus = "自然接住用户刚才这句话",
+        replyStrategy = "像熟人一样简短接话，不展开、不总结",
+        targetLength = "short",
+        shouldReadMemory = false,
+        webSearchQuery = null,
+        mcpToolCall = null
+    )
+
+    /** Retries once on malformed plan JSON; falls back to a safe direct-reply plan. */
+    private fun parseChatPlanWithFallback(provider: ApiProvider, model: String, messages: JSONArray): ChatPlan {
+        val raw = runCatching { OpenAiClient.requestCompletion(provider, model, messages, plannerSampling()) }
+            .getOrElse { throw it }
+        val first = ChatAgent.parseChatPlan(raw)
+        if (first != null) return first
+        recordLog("规划器 JSON 解析失败，重试一次", AppLogLevel.Warning)
+        val retryRaw = OpenAiClient.requestCompletion(provider, model, messages, plannerSampling())
+        val second = ChatAgent.parseChatPlan(retryRaw)
+        if (second != null) return second
+        recordLog("规划器输出仍无法解析，降级为直接回复", AppLogLevel.Warning)
+        return ChatAgent.defaultDirectPlan()
     }
 
     private fun requestChatReply(
@@ -1444,54 +1664,63 @@ $conversationJson
         globalCoreMemoryContext: String?,
         memoryContext: String?
     ): String {
-        val messages = JSONArray().apply {
-            put(JSONObject().apply {
-                put("role", "system")
-                put(
-                    "content",
-                    buildChatReplySystemPrompt(
-                        character, userName, deviceContext, plan, splitterSettings,
-                        webSearchContext, mcpToolContext, globalCoreMemoryContext, memoryContext
-                    )
-                )
-            })
-            conversation.takeLast(20).forEach { message ->
-                put(JSONObject().apply {
-                    put("role", if (message.fromUser) "user" else "assistant")
-                    put("content", message.content)
-                })
-            }
-        }
-        return OpenAiClient.requestCompletion(provider, model, messages)
+        val messages = buildReplyMessages(
+            character, conversation, userName, deviceContext, plan, splitterSettings,
+            webSearchContext, mcpToolContext, globalCoreMemoryContext, memoryContext
+        )
+        return OpenAiClient.requestCompletion(provider, model, messages, replySampling())
     }
 
-    private fun parseChatPlan(raw: String): ChatPlan {
-        val jsonText = raw.substringAfter('{', raw).substringBeforeLast('}', raw)
-            .let { if (raw.contains('{') && raw.contains('}')) "{$it}" else raw }
-        val json = runCatching { JSONObject(jsonText) }.getOrNull()
-        val shouldReply = when (val value = json?.opt("should_reply")) {
-            is Boolean -> value
-            is String -> value.equals("true", ignoreCase = true)
-            else -> true
+    private fun requestChatReplyStream(
+        provider: ApiProvider,
+        model: String,
+        character: Character,
+        conversation: List<ChatMessage>,
+        userName: String,
+        deviceContext: String,
+        plan: ChatPlan,
+        splitterSettings: ReplySplitterSettings,
+        webSearchContext: String?,
+        mcpToolContext: String?,
+        globalCoreMemoryContext: String?,
+        memoryContext: String?,
+        onDelta: (String) -> Unit
+    ): String {
+        val messages = buildReplyMessages(
+            character, conversation, userName, deviceContext, plan, splitterSettings,
+            webSearchContext, mcpToolContext, globalCoreMemoryContext, memoryContext
+        )
+        return OpenAiClient.requestCompletionStream(provider, model, messages, replySampling(), onDelta)
+    }
+
+    private fun buildReplyMessages(
+        character: Character,
+        conversation: List<ChatMessage>,
+        userName: String,
+        deviceContext: String,
+        plan: ChatPlan,
+        splitterSettings: ReplySplitterSettings,
+        webSearchContext: String?,
+        mcpToolContext: String?,
+        globalCoreMemoryContext: String?,
+        memoryContext: String?
+    ): JSONArray = JSONArray().apply {
+        put(JSONObject().apply {
+            put("role", "system")
+            put(
+                "content",
+                buildChatReplySystemPrompt(
+                    character, userName, deviceContext, plan, splitterSettings,
+                    webSearchContext, mcpToolContext, globalCoreMemoryContext, memoryContext
+                )
+            )
+        })
+        trimConversationForReply(conversation).forEach { message ->
+            put(JSONObject().apply {
+                put("role", if (message.fromUser) "user" else "assistant")
+                put("content", message.content)
+            })
         }
-        val focus = json?.optString("reply_focus")?.trim().orEmpty().ifBlank { "回应用户刚刚表达的内容" }
-        val strategy = json?.optString("reply_strategy")?.trim().orEmpty().ifBlank { "自然、直接地回应当前话题" }
-        val length = json?.optString("target_length")?.trim().orEmpty().lowercase()
-            .takeIf { it in setOf("short", "medium", "long") } ?: "medium"
-        val shouldReadMemory = when (val value = json?.opt("memory_read")) {
-            is Boolean -> value
-            is String -> value.equals("true", ignoreCase = true)
-            else -> false
-        }
-        val webSearchQuery = normalizeWebSearchQuery(json?.optString("web_search_query"))
-        val call = json?.optJSONObject("mcp_tool_call")?.let { tool ->
-            val serverId = tool.optString("server_id").trim()
-            val name = tool.optString("name").trim()
-            val arguments = tool.optJSONObject("arguments")
-            if (serverId.isBlank() || name.isBlank() || arguments == null) null
-            else McpToolCall(serverId, name, arguments.toString())
-        }
-        return ChatPlan(shouldReply, focus, strategy, length, shouldReadMemory, webSearchQuery, call)
     }
 
     private fun friendlyError(endpoint: String, error: Throwable): String {
@@ -1526,7 +1755,78 @@ $conversationJson
         }
     }
 
+    /** Re-checks Shizuku install/binder/permission state from the settings screen. */
+    fun refreshShizuku() {
+        val context = appContext ?: return
+        ShizukuClient.refresh(context)
+        recordLog("刷新 Shizuku 状态：${ShizukuClient.statusLabel()}")
+    }
+
+    fun requestShizukuPermission() {
+        ShizukuClient.requestPermission()
+        recordLog("已请求 Shizuku 授权")
+    }
+
+    fun openShizukuApp() {
+        val context = appContext ?: return
+        val opened = ShizukuClient.openShizukuApp(context)
+        if (!opened) {
+            ShizukuClient.openDownloadPage(context)
+            recordLog("未找到 Shizuku 应用，已打开下载页")
+        } else {
+            recordLog("已打开 Shizuku 应用")
+        }
+    }
+
+    fun shizukuPrimaryAction() {
+        val context = appContext ?: return
+        when (ShizukuClient.state) {
+            ShizukuClient.State.NotInstalled -> ShizukuClient.openDownloadPage(context)
+            ShizukuClient.State.WaitingForService, ShizukuClient.State.Dead -> {
+                if (!ShizukuClient.openShizukuApp(context)) ShizukuClient.openDownloadPage(context)
+                ShizukuClient.refresh(context)
+            }
+            ShizukuClient.State.PermissionNeeded, ShizukuClient.State.PermissionDenied ->
+                ShizukuClient.requestPermission()
+            ShizukuClient.State.Connecting, ShizukuClient.State.Ready -> Unit
+        }
+    }
+
+    fun openShizukuPage() {
+        destination = Destination.Shizuku
+        shizukuTestResult = null
+    }
+
+    /** Runs a safe diagnostic command through the privileged UserService. */
+    fun testShizukuConnection() {
+        if (isShizukuTesting) return
+        isShizukuTesting = true
+        shizukuTestResult = "正在检测…"
+        providerScope.launch {
+            val result = ShizukuClient.exec("id; getprop ro.build.version.release; echo OK")
+            withContext(Dispatchers.Main) {
+                isShizukuTesting = false
+                shizukuTestResult = if (result.startsWith("Shizuku") || result.startsWith("尚未") || result.startsWith("无法")) {
+                    "检测失败：$result"
+                } else {
+                    "检测成功\n$result"
+                }
+                recordLog("Shizuku 连接检测：${result.take(120)}")
+            }
+        }
+    }
+
+    fun copyShizukuAdbCommand(context: Context) {
+        val command = ShizukuClient.adbStartCommand(context)
+        runCatching {
+            val clipboard = context.getSystemService(android.content.ClipboardManager::class.java)
+            clipboard.setPrimaryClip(android.content.ClipData.newPlainText("Shizuku ADB 启动命令", command))
+        }
+        recordLog("已复制 Shizuku ADB 启动命令")
+    }
+
     override fun onCleared() {
+        appContext?.let { ShizukuClient.detach(it) }
         providerScope.cancel()
         super.onCleared()
     }

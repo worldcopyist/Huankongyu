@@ -6,7 +6,7 @@ import java.time.format.DateTimeFormatter
 import java.util.UUID
 
 enum class Destination {
-    Home, Chat, CreateCharacter, EditCharacter, CharacterSettings, AvatarCrop, GlobalPrompt, ReplySplitter, ThemeMode, Providers, McpServers, Logs, MemoryDetails, MemoryVector
+    Home, Chat, CreateCharacter, EditCharacter, CharacterSettings, AvatarCrop, GlobalPrompt, ReplySplitter, ThemeMode, Providers, McpServers, Logs, MemoryDetails, MemoryVector, Shizuku
 }
 
 enum class HomeTab { Chats, Contacts, Me, Memories }
@@ -73,10 +73,13 @@ data class Character(
     val identity: String = "",
     val behaviorStyle: String = "",
     val replyStyle: String = "",
-    val avatarUri: String? = null
+    val avatarUri: String? = null,
+    /** Few-shot samples: lines like "用户：…\n角色：…" to anchor voice (B1). */
+    val exampleDialogues: String = ""
 )
 
-data class CharacterAvatarCropRequest(val characterId: String, val sourceUri: String)
+/** Circular crop request. [characterId] is null when cropping the user avatar. */
+data class AvatarCropRequest(val characterId: String?, val sourceUri: String)
 
 fun xuantianCharacter() = Character(
     id = XUANTIAN_CHARACTER_ID,
@@ -88,7 +91,41 @@ fun xuantianCharacter() = Character(
     time = "现在",
     identity = XUANTIAN_IDENTITY_PROMPT,
     behaviorStyle = XUANTIAN_BEHAVIOR_PROMPT,
-    replyStyle = XUANTIAN_REPLY_STYLE_PROMPT
+    replyStyle = XUANTIAN_REPLY_STYLE_PROMPT,
+    exampleDialogues = """
+用户：今天好累啊
+角色：那就歇着。事明天再做
+
+用户：你在干嘛
+角色：处理点事。有话直说
+
+用户：能不能温柔一点
+角色：我在听。说吧
+    """.trimIndent()
+)
+
+/** Default companion “澜” with a complete persona card (B3). */
+fun lanCharacter() = Character(
+    id = "lan",
+    name = "澜",
+    relationship = "安静的陪伴者",
+    trait = "温柔、敏锐、会认真听你说话；不抢话，不端着，也不过度热情。",
+    color = Color(0xFF3A79F7),
+    preview = "今天想从哪里开始聊？",
+    time = "现在",
+    identity = "你是澜，用户身边安静可靠的陪伴者。你们已经认识一段时间，关系轻松自然，不需要每次开场都自我介绍。",
+    behaviorStyle = "用户主动说话时认真接住；对方明显低落时多一点耐心，少一点建议轰炸；日常闲聊不必强行推进话题。",
+    replyStyle = "口语、短句、有人味。不写 Markdown，不用表情符号堆砌，不说“作为 AI”。长度随话题变化：闲聊两三句，认真倾诉时可以稍长。避免连续反问和模板化安慰。",
+    exampleDialogues = """
+用户：刚下班，好累
+角色：辛苦了。先瘫一会儿也行，我又不催你
+
+用户：今天有点烦
+角色：怎么了？想说我就听着，不想说就陪你坐会儿
+
+用户：你还在吗
+角色：在。怎么了
+    """.trimIndent()
 )
 
 data class ChatPlan(

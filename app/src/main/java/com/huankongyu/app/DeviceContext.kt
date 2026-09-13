@@ -11,6 +11,7 @@ import android.location.LocationManager
 import android.os.Build
 import android.provider.CalendarContract
 import androidx.core.content.ContextCompat
+import com.huankongyu.app.shizuku.ShizukuClient
 import java.time.Instant
 import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
@@ -19,11 +20,25 @@ import kotlin.coroutines.resume
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeoutOrNull
 
-/** Live, permission-gated device context injected into planner and reply prompts. */
-internal suspend fun buildLiveDeviceContext(context: Context): String {
+/**
+ * Live, permission-gated device context injected into planner and reply prompts.
+ * [hints] is a comma list from [ChatAgent.deviceContextHint]; when null, the full
+ * context is used (planner). Reply stage should pass a hint list so casual chat
+ * is not flooded with calendar/location (B7).
+ */
+internal suspend fun buildLiveDeviceContext(context: Context, hints: String? = null): String {
+    val want = hints?.split(',')?.map { it.trim() }?.toSet()
+    val includeAll = want == null
+    fun has(key: String) = includeAll || key in (want ?: emptySet())
+
     val now = ZonedDateTime.now()
     val dateText = now.format(DateTimeFormatter.ofPattern("yyyy年M月d日 HH:mm，EEEE", Locale.SIMPLIFIED_CHINESE))
-    return "本机时间：$dateText（时区 ${now.zone.id}）。\n节日：${festivalFor(now)}。\n日历：${todayCalendarSummary(context, now)}。\n位置：${currentLocationSummary(context)}。"
+    val parts = mutableListOf("本机时间：$dateText（时区 ${now.zone.id}）")
+    if (has("festival")) parts += "节日：${festivalFor(now)}"
+    if (has("calendar")) parts += "日历：${todayCalendarSummary(context, now)}"
+    if (has("location")) parts += "位置：${currentLocationSummary(context)}"
+    if (has("shizuku")) parts += "特权通道：${ShizukuClient.deviceContextLine()}"
+    return parts.joinToString("。\n") + "。"
 }
 
 private fun festivalFor(now: ZonedDateTime): String {

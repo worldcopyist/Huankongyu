@@ -122,6 +122,9 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
             database.execSQL("ALTER TABLE long_term_memories ADD COLUMN metadata_json TEXT NOT NULL DEFAULT '{}'")
             database.execSQL("CREATE INDEX IF NOT EXISTS idx_long_term_memories_scope_tier_created ON long_term_memories(character_id, memory_tier, created_at DESC)")
         }
+        if (oldVersion < 16) {
+            database.execSQL("ALTER TABLE characters ADD COLUMN example_dialogues TEXT NOT NULL DEFAULT ''")
+        }
     }
 
     fun load(): PersistedProviderConfiguration {
@@ -197,7 +200,7 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
         }
         val characters = mutableListOf<Character>()
         readableDatabase.query(
-            "characters", arrayOf("id", "name", "relationship", "trait", "identity", "behavior_style", "reply_style", "avatar_uri", "color_value", "preview", "message_time", "pinned"),
+            "characters", arrayOf("id", "name", "relationship", "trait", "identity", "behavior_style", "reply_style", "avatar_uri", "color_value", "preview", "message_time", "pinned", "example_dialogues"),
             null, null, null, null, "sort_order ASC"
         ).use { cursor ->
             while (cursor.moveToNext()) {
@@ -213,7 +216,8 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
                     identity = cursor.getString(4),
                     behaviorStyle = cursor.getString(5),
                     replyStyle = cursor.getString(6),
-                    avatarUri = cursor.getStringOrNull(7)
+                    avatarUri = cursor.getStringOrNull(7),
+                    exampleDialogues = cursor.getStringOrNull(12).orEmpty()
                 )
             }
         }
@@ -342,6 +346,7 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
                     put("identity", character.identity)
                     put("behavior_style", character.behaviorStyle)
                     put("reply_style", character.replyStyle)
+                    put("example_dialogues", character.exampleDialogues)
                     put("avatar_uri", character.avatarUri)
                     put("color_value", character.color.toArgb())
                     put("preview", character.preview)
@@ -550,6 +555,7 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
                 identity TEXT NOT NULL DEFAULT '',
                 behavior_style TEXT NOT NULL DEFAULT '',
                 reply_style TEXT NOT NULL DEFAULT '',
+                example_dialogues TEXT NOT NULL DEFAULT '',
                 avatar_uri TEXT,
                 color_value INTEGER NOT NULL,
                 preview TEXT NOT NULL,
@@ -587,7 +593,7 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
 
     private companion object {
         const val DATABASE_NAME = "huankongyu.db"
-        const val DATABASE_VERSION = 15
+        const val DATABASE_VERSION = 16
     }
 }
 

@@ -7,10 +7,15 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Paint
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffColorFilter
+import android.graphics.PorterDuffXfermode
+import android.graphics.Rect
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.LruCache
 import android.widget.ImageView
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
@@ -30,11 +35,16 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
+import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -85,9 +95,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import kotlin.math.abs
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -95,6 +108,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
@@ -111,8 +125,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.huankongyu.app.shizuku.ShizukuClient
 import com.huankongyu.app.ui.theme.HuankongyuTheme
 import com.huankongyu.app.ui.theme.IslandBlue
+import com.huankongyu.app.ui.theme.IslandGreen
 import com.huankongyu.app.ui.theme.IslandMuted
 import java.io.File
 import java.nio.charset.Charset
@@ -158,33 +174,96 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
             showPermissionRationale = true
         }
     }
-    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        if (uri != null) viewModel.importUserAvatar(context, uri)
-    }
-    val openAvatarPicker = { avatarPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
     var pendingCharacterAvatarId by remember { mutableStateOf<String?>(null) }
-    val characterAvatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+    var pendingUserAvatarPick by remember { mutableStateOf(false) }
+
+    val avatarPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            if (pendingUserAvatarPick) {
+                pendingUserAvatarPick = false
+                pendingCharacterAvatarId = null
+                viewModel.beginUserAvatarCrop(uri)
+            } else {
+                val characterId = pendingCharacterAvatarId
+                pendingCharacterAvatarId = null
+                if (characterId != null) viewModel.beginCharacterAvatarCrop(characterId, uri)
+            }
+        }
+    }
+
+    /**
+     * Prefer the installed gallery (ACTION_PICK) so user-created albums are visible.
+     * The Android Photo Picker (PickVisualMedia) is only a fallback — on many OEM ROMs
+     * it hides custom albums behind a limited “safe” UI.
+     */
+    val albumImagePicker = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val characterId = pendingCharacterAvatarId
+        val forUserAvatar = pendingUserAvatarPick
         pendingCharacterAvatarId = null
+        pendingUserAvatarPick = false
         val uri = if (result.resultCode == Activity.RESULT_OK) result.data?.data else null
-        if (uri != null && characterId != null) viewModel.beginCharacterAvatarCrop(characterId, uri)
+        when {
+            uri == null -> Unit
+            forUserAvatar -> viewModel.beginUserAvatarCrop(uri)
+            characterId != null -> viewModel.beginCharacterAvatarCrop(characterId, uri)
+        }
     }
-    val launchCharacterAvatarPicker = {
-        // ACTION_PICK opens the installed gallery's full album browser. Unlike the
-        // Android Photo Picker's “safe access” UI, it can show user-created albums.
-        characterAvatarPicker.launch(
-            Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
-                .setType("image/*")
-                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        )
+
+    val launchAlbumImagePicker = {
+        val galleryIntent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+            .setType("image/*")
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        val canResolve = runCatching { galleryIntent.resolveActivity(context.packageManager) != null }.getOrDefault(false)
+        if (canResolve) {
+            albumImagePicker.launch(galleryIntent)
+        } else {
+            // No gallery app resolved (unusual) — fall back to the system photo picker.
+            avatarPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+        }
     }
-    val characterImagePermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-        launchCharacterAvatarPicker()
+
+    val mediaPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { grants ->
+        val allowed = grants.values.any { it }
+        if (allowed) {
+            launchAlbumImagePicker()
+        } else {
+            pendingCharacterAvatarId = null
+            pendingUserAvatarPick = false
+        }
+    }
+
+    fun ensureMediaPermissionThenPick() {
+        val needed = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                add(Manifest.permission.READ_MEDIA_IMAGES)
+                // Android 14+ partial access still lets ACTION_PICK return a grantable URI.
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                    add(Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED)
+                }
+            } else {
+                add(Manifest.permission.READ_EXTERNAL_STORAGE)
+            }
+        }.filter {
+            ContextCompat.checkSelfPermission(context, it) != PackageManager.PERMISSION_GRANTED
+        }
+        if (needed.isEmpty()) {
+            launchAlbumImagePicker()
+        } else {
+            mediaPermissionLauncher.launch(needed.toTypedArray())
+        }
+    }
+
+    val openAvatarPicker = {
+        pendingUserAvatarPick = true
+        pendingCharacterAvatarId = null
+        ensureMediaPermissionThenPick()
     }
     val openCharacterAvatarPicker = { characterId: String ->
         pendingCharacterAvatarId = characterId
-        val permission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
-        if (ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED) launchCharacterAvatarPicker() else characterImagePermissionLauncher.launch(permission)
+        pendingUserAvatarPick = false
+        ensureMediaPermissionThenPick()
     }
 
     val systemInDarkTheme = isSystemInDarkTheme()
@@ -211,13 +290,14 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                 viewModel.destination == Destination.GlobalPrompt -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.ReplySplitter -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.ThemeMode -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
+                viewModel.destination == Destination.Shizuku -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.Providers -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.McpServers -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.Logs -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.MemoryDetails -> viewModel.closeMemoryDetails()
                 viewModel.destination == Destination.EditCharacter -> viewModel.destination = Destination.Chat
                 viewModel.destination == Destination.CharacterSettings -> viewModel.destination = Destination.Chat
-                viewModel.destination == Destination.AvatarCrop -> { viewModel.characterAvatarCropRequest = null; viewModel.destination = Destination.CharacterSettings }
+                viewModel.destination == Destination.AvatarCrop -> viewModel.cancelAvatarCrop()
                 viewModel.destination == Destination.Chat -> viewModel.requestChatExit()
                 viewModel.destination != Destination.Home -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Chats }
                 viewModel.selectedTab != HomeTab.Chats -> viewModel.selectedTab = HomeTab.Chats
@@ -244,46 +324,54 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
             }
             Box(contentModifier) {
                 when (viewModel.destination) {
-                    Destination.Home -> when (viewModel.selectedTab) {
-                        HomeTab.Chats -> HomeScreen(viewModel.userName, viewModel.userSignature, viewModel.characters, viewModel.userAvatarUri, { viewModel.selectedTab = HomeTab.Contacts }, viewModel::openChat, viewModel::togglePinned, viewModel::deleteCharacter)
-                        HomeTab.Contacts -> ContactsScreen(viewModel.characters, { viewModel.destination = Destination.CreateCharacter }, viewModel::openChat)
-                        HomeTab.Me -> SettingsScreen(
-                            activeProvider = viewModel.activeProvider(),
-                            selectedModels = viewModel.selectedModels,
-                            userName = viewModel.userName,
-                            userSignature = viewModel.userSignature,
-                            userAvatarUri = viewModel.userAvatarUri,
-                            themeMode = viewModel.themeMode,
-                            replySplitterSettings = viewModel.replySplitterSettings,
-                            mcpServers = viewModel.mcpServers,
-                            onEditAvatar = openAvatarPicker,
-                            onUserNameChange = viewModel::updateUserName,
-                            onUserSignatureChange = viewModel::updateUserSignature,
-                            onOpenGlobalPrompt = { viewModel.destination = Destination.GlobalPrompt },
-                            onOpenReplySplitter = { viewModel.destination = Destination.ReplySplitter },
-                            onOpenThemeMode = { viewModel.destination = Destination.ThemeMode },
-                            onOpenMcpServers = { viewModel.destination = Destination.McpServers },
-                            onOpenLogs = viewModel::openLogs,
-                            hasSystemPermissions = hasSystemPermissions,
-                            onRequestSystemPermissions = requestSystemPermissions,
-                            onOpenProviders = { viewModel.destination = Destination.Providers },
-                            onSelectModel = viewModel::selectModel,
-                            modelNameCheckState = viewModel.modelNameCheckState,
-                            modelConnectionTestState = viewModel.modelConnectionTestState,
-                            onValidateModelName = viewModel::validateModelName,
-                            onTestModelConnectivity = viewModel::testModelConnectivity
-                        )
-                        HomeTab.Memories -> MemoriesScreen(
-                            hasEmbeddingModel = viewModel.selectedModels.embedding != null,
-                            memories = viewModel.longTermMemories,
-                            characters = viewModel.characters,
-                            userName = viewModel.userName,
-                            userAvatarUri = viewModel.userAvatarUri,
-                            latestChatAt = viewModel::latestChatAtForMemory,
-                            onConfigureEmbedding = { viewModel.selectedTab = HomeTab.Me },
-                            onOpenScope = viewModel::openMemoryScope
-                        )
-                    }
+                    Destination.Home -> SwipeHomePager(
+                        selectedTab = viewModel.selectedTab,
+                        onTabSelected = { viewModel.selectedTab = it },
+                        content = { tab ->
+                            when (tab) {
+                                HomeTab.Chats -> HomeScreen(viewModel.userName, viewModel.userSignature, viewModel.characters, viewModel.userAvatarUri, { viewModel.selectedTab = HomeTab.Contacts }, viewModel::openChat, viewModel::togglePinned, viewModel::deleteCharacter)
+                                HomeTab.Contacts -> ContactsScreen(viewModel.characters, { viewModel.destination = Destination.CreateCharacter }, viewModel::openChat)
+                                HomeTab.Me -> SettingsScreen(
+                                    activeProvider = viewModel.activeProvider(),
+                                    selectedModels = viewModel.selectedModels,
+                                    userName = viewModel.userName,
+                                    userSignature = viewModel.userSignature,
+                                    userAvatarUri = viewModel.userAvatarUri,
+                                    themeMode = viewModel.themeMode,
+                                    replySplitterSettings = viewModel.replySplitterSettings,
+                                    mcpServers = viewModel.mcpServers,
+                                    onEditAvatar = openAvatarPicker,
+                                    onUserNameChange = viewModel::updateUserName,
+                                    onUserSignatureChange = viewModel::updateUserSignature,
+                                    onOpenGlobalPrompt = { viewModel.destination = Destination.GlobalPrompt },
+                                    onOpenReplySplitter = { viewModel.destination = Destination.ReplySplitter },
+                                    onOpenThemeMode = { viewModel.destination = Destination.ThemeMode },
+                                    onOpenMcpServers = { viewModel.destination = Destination.McpServers },
+                                    onOpenLogs = viewModel::openLogs,
+                                    hasSystemPermissions = hasSystemPermissions,
+                                    onRequestSystemPermissions = requestSystemPermissions,
+                                    shizukuState = viewModel.shizukuState,
+                                    onOpenShizuku = viewModel::openShizukuPage,
+                                    onOpenProviders = { viewModel.destination = Destination.Providers },
+                                    onSelectModel = viewModel::selectModel,
+                                    modelNameCheckState = viewModel.modelNameCheckState,
+                                    modelConnectionTestState = viewModel.modelConnectionTestState,
+                                    onValidateModelName = viewModel::validateModelName,
+                                    onTestModelConnectivity = viewModel::testModelConnectivity
+                                )
+                                HomeTab.Memories -> MemoriesScreen(
+                                    hasEmbeddingModel = viewModel.selectedModels.embedding != null,
+                                    memories = viewModel.longTermMemories,
+                                    characters = viewModel.characters,
+                                    userName = viewModel.userName,
+                                    userAvatarUri = viewModel.userAvatarUri,
+                                    latestChatAt = viewModel::latestChatAtForMemory,
+                                    onConfigureEmbedding = { viewModel.selectedTab = HomeTab.Me },
+                                    onOpenScope = viewModel::openMemoryScope
+                                )
+                            }
+                        }
+                    )
                     Destination.Chat -> Box(Modifier.fillMaxSize()) {
                         // Keep the destination page alive beneath the departing chat.
                         // This makes the rightward exit reveal the actual home page,
@@ -310,14 +398,17 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                             isResponding = viewModel.isChatResponding,
                             responseStatus = viewModel.chatStatus,
                             replyError = viewModel.chatError,
+                            streamingText = viewModel.chatStreamingText,
                             playEntrance = viewModel.animateChatEntrance,
                             onEntranceStarted = viewModel::consumeChatEntranceAnimation,
                             exitRequested = viewModel.chatExitRequested,
                             onBack = viewModel::requestChatExit,
                             onExitComplete = viewModel::completeChatExit,
                             onSend = viewModel::sendMessage,
-                            onEditCharacter = { viewModel.destination = Destination.CharacterSettings }
-                        ) { message -> coroutineScope.launch { snackbarHostState.showSnackbar(message) } }
+                            onEditCharacter = { viewModel.destination = Destination.CharacterSettings },
+                            onAttachment = { message -> coroutineScope.launch { snackbarHostState.showSnackbar(message) } },
+                            onCancelReply = viewModel::cancelChat
+                        )
                     }
                     Destination.CreateCharacter -> CreateCharacterScreen(
                         onBack = { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Chats },
@@ -337,11 +428,18 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                         onEditAvatar = { openCharacterAvatarPicker(viewModel.selectedCharacterId) },
                         onEditPrompt = { viewModel.destination = Destination.EditCharacter }
                     )
-                    Destination.AvatarCrop -> viewModel.characterAvatarCropRequest?.let { request -> AvatarCropScreen(
+                    Destination.AvatarCrop -> viewModel.avatarCropRequest?.let { request -> AvatarCropScreen(
+                        title = if (request.characterId == null) "裁剪我的头像" else "裁剪角色头像",
                         sourceUri = request.sourceUri,
-                        onCancel = { viewModel.characterAvatarCropRequest = null; viewModel.destination = Destination.CharacterSettings },
-                        onSave = { bitmap -> viewModel.saveCroppedCharacterAvatar(context, request.characterId, bitmap) }
-                    ) } ?: LaunchedEffect(Unit) { viewModel.destination = Destination.CharacterSettings }
+                        onCancel = viewModel::cancelAvatarCrop,
+                        onSave = { bitmap ->
+                            if (request.characterId == null) {
+                                viewModel.saveCroppedUserAvatar(context, bitmap)
+                            } else {
+                                viewModel.saveCroppedCharacterAvatar(context, request.characterId, bitmap)
+                            }
+                        }
+                    ) } ?: LaunchedEffect(Unit) { viewModel.cancelAvatarCrop() }
                     Destination.GlobalPrompt -> GlobalPromptScreen(
                         sections = viewModel.globalPromptSections,
                         onBack = { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me },
@@ -368,6 +466,20 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                             viewModel.destination = Destination.Home
                             viewModel.selectedTab = HomeTab.Me
                         }
+                    )
+                    Destination.Shizuku -> ShizukuScreen(
+                        state = viewModel.shizukuState,
+                        statusDetail = viewModel.shizukuStatusDetail,
+                        lastError = viewModel.shizukuLastError,
+                        serverVersion = viewModel.shizukuServerVersion,
+                        privilegeUid = viewModel.shizukuPrivilegeUid,
+                        testResult = viewModel.shizukuTestResult,
+                        isTesting = viewModel.isShizukuTesting,
+                        onBack = { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me },
+                        onRefresh = viewModel::refreshShizuku,
+                        onPrimaryAction = viewModel::shizukuPrimaryAction,
+                        onTest = viewModel::testShizukuConnection,
+                        onOpenShizukuApp = viewModel::openShizukuApp
                     )
                     Destination.Providers -> ProviderManagementScreen(
                         providers = viewModel.apiProviders,
@@ -455,12 +567,190 @@ private fun missingSystemPermissions(context: Context): Array<String> = buildLis
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.POST_NOTIFICATIONS)
 }.toTypedArray()
 
+/**
+ * Two-layer swipe pager for the four home tabs.
+ *
+ * Swipe left (RTL): current page slides away; next page grows from ~90% under a full-page scrim.
+ * Swipe right (LTR): previous page slides in from the left and covers the current page,
+ * which shrinks toward ~90% under a full-page scrim.
+ *
+ * Offset is always linear with the finger. The page that was under the finger does not
+ * jump when the gesture direction is recognized.
+ */
+@Composable
+private fun SwipeHomePager(
+    selectedTab: HomeTab,
+    onTabSelected: (HomeTab) -> Unit,
+    content: @Composable (HomeTab) -> Unit
+) {
+    val tabs = HomeTab.entries
+    val scope = rememberCoroutineScope()
+    var dragX by remember { mutableStateOf(0f) }
+    var isDragging by remember { mutableStateOf(false) }
+    var isSettling by remember { mutableStateOf(false) }
+    val settleAnim = remember { Animatable(0f) }
+    var viewportWidth by remember { mutableStateOf(1f) }
+    val background = MaterialTheme.colorScheme.background
+
+    LaunchedEffect(selectedTab) {
+        settleAnim.stop()
+        isSettling = false
+        isDragging = false
+        dragX = 0f
+    }
+
+    val dragState = rememberDraggableState { delta ->
+        if (!isSettling) {
+            isDragging = true
+            dragX = (dragX + delta).coerceIn(-viewportWidth, viewportWidth)
+        }
+    }
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onSizeChanged { viewportWidth = it.width.toFloat().coerceAtLeast(1f) }
+            .draggable(
+                state = dragState,
+                orientation = Orientation.Horizontal,
+                onDragStarted = { isDragging = true },
+                onDragStopped = { velocity ->
+                    scope.launch {
+                        val offsetThreshold = viewportWidth * 0.12f
+                        val velocityThreshold = 900f
+                        val index = tabs.indexOf(selectedTab)
+                        val goNext = index < tabs.lastIndex &&
+                            (dragX <= -offsetThreshold || velocity <= -velocityThreshold)
+                        val goPrev = index > 0 &&
+                            (dragX >= offsetThreshold || velocity >= velocityThreshold)
+                        val target = when {
+                            goNext -> -viewportWidth
+                            goPrev -> viewportWidth
+                            else -> 0f
+                        }
+                        // Start settle from the exact finger position — no velocity-based
+                        // position boost (that produced a visible jump, especially LTR).
+                        isSettling = true
+                        settleAnim.snapTo(dragX)
+                        settleAnim.animateTo(target, tween(if (goNext || goPrev) 230 else 184))
+                        dragX = target
+                        isSettling = false
+                        isDragging = false
+                        if (goNext) {
+                            onTabSelected(tabs[index + 1])
+                            dragX = 0f
+                        } else if (goPrev) {
+                            onTabSelected(tabs[index - 1])
+                            dragX = 0f
+                        }
+                    }
+                    true
+                }
+            )
+    ) {
+        val offset = if (isSettling) settleAnim.value else dragX
+        val currentIndex = tabs.indexOf(selectedTab).coerceAtLeast(0)
+        val width = viewportWidth
+        val progress = (abs(offset) / width).coerceIn(0f, 1f)
+        val goingForward = offset < 0f
+        val goingBack = offset > 0f
+        val minScale = 0.9f
+
+        val underScale = when {
+            goingForward -> minScale + (1f - minScale) * progress
+            goingBack -> 1f - (1f - minScale) * progress
+            else -> 1f
+        }
+        val coveredAmount = when {
+            goingForward -> 1f - progress
+            goingBack -> progress
+            else -> 0f
+        }
+
+        // Warm the previous page on drag start so LTR doesn't hitch; only compose
+        // the next page while actually swiping left (otherwise it would peek when
+        // the current page shrinks during a cover).
+        val showNext = goingForward && currentIndex < tabs.lastIndex
+        val showPrev = (goingBack || isDragging) && currentIndex > 0
+
+        // Layer 1 — next page underlay (revealed when swiping left).
+        if (showNext && currentIndex < tabs.lastIndex) {
+            Box(Modifier.fillMaxSize()) {
+                Box(
+                    Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            scaleX = if (goingForward) underScale else minScale
+                            scaleY = if (goingForward) underScale else minScale
+                        }
+                        .background(background)
+                ) {
+                    content(tabs[currentIndex + 1])
+                }
+                if (goingForward) {
+                    Box(
+                        Modifier
+                            .fillMaxSize()
+                            .background(Color.Black.copy(alpha = 0.42f * coveredAmount))
+                    )
+                }
+            }
+        }
+
+        // Layer 2 — current page.
+        // RTL: it is the top sheet and slides left.
+        // LTR: it stays put under the incoming previous page and shrinks.
+        Box(
+            Modifier
+                .fillMaxSize()
+                .graphicsLayer {
+                    if (goingBack) {
+                        scaleX = underScale
+                        scaleY = underScale
+                    } else {
+                        translationX = offset
+                    }
+                }
+                .background(background)
+        ) {
+            content(tabs[currentIndex])
+        }
+
+        if (goingBack) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .background(Color.Black.copy(alpha = 0.42f * coveredAmount))
+            )
+        }
+
+        // Layer 3 — previous page covers from the left (LTR only).
+        if (showPrev && currentIndex > 0) {
+            val prevTranslation = -width + offset.coerceAtLeast(0f)
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        translationX = prevTranslation
+                        shadowElevation = 16.dp.toPx()
+                        shape = RoundedCornerShape(0.dp)
+                        clip = false
+                    }
+                    .background(background)
+            ) {
+                content(tabs[currentIndex - 1])
+            }
+        }
+    }
+}
+
 @Composable
 private fun AppNavigationBar(selectedTab: HomeTab, onSelect: (HomeTab) -> Unit) {
     val items = listOf(HomeTab.Chats to ("聊" to "聊天"), HomeTab.Contacts to ("人" to "通讯录"), HomeTab.Me to ("我" to "我"), HomeTab.Memories to ("忆" to "记忆库"))
     val unselectedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
     NavigationBar(
-        modifier = Modifier.height(64.dp),
+        // Slightly taller bar + top padding on glyphs ≈ 1mm of surface above “聊”.
+        modifier = Modifier.height(72.dp),
         containerColor = navigationSurfaceColor(),
         tonalElevation = 0.dp
     ) {
@@ -470,7 +760,9 @@ private fun AppNavigationBar(selectedTab: HomeTab, onSelect: (HomeTab) -> Unit) 
                 selected = selected,
                 onClick = { onSelect(tab) },
                 icon = {
-                    NavigationGlyph(label.first, selected, if (selected) IslandBlue else unselectedColor)
+                    Box(Modifier.padding(top = 4.dp)) {
+                        NavigationGlyph(label.first, selected, if (selected) IslandBlue else unselectedColor)
+                    }
                 },
                 label = { Text(label.second, color = if (selected) IslandBlue else unselectedColor) },
                 colors = NavigationBarItemDefaults.colors(
@@ -486,24 +778,101 @@ private fun AppNavigationBar(selectedTab: HomeTab, onSelect: (HomeTab) -> Unit) 
 }
 
 /**
- * Draw the whole glyph once with Android's text renderer.  Compose's per-stroke
- * text style outlines each CJK component separately, producing doubled lines at
- * intersections.  A single native text outline keeps the inside clean.
+ * Bottom-nav CJK glyphs.
+ *
+ * Unselected outline is built by rasterizing the *filled* glyph, dilating it,
+ * then punching the original fill back out with CLEAR. That yields a single
+ * outer ring — stroke Style on drawText is unusable here because CJK fonts
+ * ship overlapping stroke contours, so every intersection gets a doubled border.
  */
+private data class NavGlyphKey(
+    val glyph: String,
+    val selected: Boolean,
+    val colorArgb: Int,
+    val textSizePx: Int,
+    val strokePx: Int
+)
+
+private val navGlyphCache = object : LruCache<NavGlyphKey, Bitmap>(48) {}
+
+private fun buildNavGlyphBitmap(
+    glyph: String,
+    selected: Boolean,
+    textSizePx: Float,
+    strokePx: Float
+): Bitmap {
+    val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.textSize = textSizePx
+        textAlign = Paint.Align.CENTER
+        color = android.graphics.Color.WHITE
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+    }
+    val bounds = Rect()
+    textPaint.getTextBounds(glyph, 0, glyph.length, bounds)
+    val pad = strokePx.toInt() + 4
+    val width = (bounds.width() + pad * 2).coerceAtLeast(1)
+    val height = (bounds.height() + pad * 2).coerceAtLeast(1)
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = android.graphics.Canvas(bitmap)
+    val cx = width / 2f
+    // getTextBounds top is negative; drawText baseline sits at -top when centered on bounds.
+    val baseline = height / 2f - (bounds.top + bounds.bottom) / 2f
+
+    if (selected) {
+        canvas.drawText(glyph, cx, baseline, textPaint)
+        return bitmap
+    }
+
+    // Dilate the filled glyph into a soft outer mass.
+    val radius = strokePx / 2f
+    val steps = 20
+    for (i in 0 until steps) {
+        val angle = (2.0 * Math.PI * i) / steps
+        canvas.drawText(
+            glyph,
+            cx + (Math.cos(angle) * radius).toFloat(),
+            baseline + (Math.sin(angle) * radius).toFloat(),
+            textPaint
+        )
+    }
+    canvas.drawText(glyph, cx, baseline, textPaint)
+
+    // Punch out the original filled shape so only the outer ring remains.
+    val clearPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        this.textSize = textSizePx
+        textAlign = Paint.Align.CENTER
+        typeface = android.graphics.Typeface.DEFAULT_BOLD
+        xfermode = PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+    }
+    canvas.drawText(glyph, cx, baseline, clearPaint)
+    return bitmap
+}
+
 @Composable
 private fun NavigationGlyph(glyph: String, selected: Boolean, color: Color) {
     Canvas(Modifier.width(40.dp).height(30.dp)) {
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            this.color = color.toArgb()
-            textAlign = Paint.Align.CENTER
-            textSize = 27.sp.toPx()
-            style = if (selected) Paint.Style.FILL else Paint.Style.STROKE
-            strokeWidth = if (selected) 0f else 1.05.dp.toPx()
-            strokeJoin = Paint.Join.ROUND
-            strokeCap = Paint.Cap.ROUND
+        val textSizePx = 27.sp.toPx()
+        val strokePx = 1.05.dp.toPx()
+        val key = NavGlyphKey(
+            glyph = glyph,
+            selected = selected,
+            colorArgb = color.toArgb(),
+            textSizePx = textSizePx.roundToInt(),
+            strokePx = strokePx.roundToInt()
+        )
+        val bitmap = navGlyphCache.get(key)
+            ?: buildNavGlyphBitmap(glyph, selected, textSizePx, strokePx).also { navGlyphCache.put(key, it) }
+        val tint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            colorFilter = PorterDuffColorFilter(color.toArgb(), PorterDuff.Mode.SRC_IN)
         }
-        val baseline = size.height / 2f - (paint.ascent() + paint.descent()) / 2f
-        drawIntoCanvas { canvas -> canvas.nativeCanvas.drawText(glyph, size.width / 2f, baseline, paint) }
+        drawIntoCanvas { canvas ->
+            canvas.nativeCanvas.drawBitmap(
+                bitmap,
+                (size.width - bitmap.width) / 2f,
+                (size.height - bitmap.height) / 2f,
+                tint
+            )
+        }
     }
 }
 
@@ -679,7 +1048,24 @@ private fun ContactsScreen(characters: List<Character>, onCreateCharacter: () ->
 }
 
 @Composable
-private fun ChatScreen(character: Character, userAvatarUri: String?, messages: List<ChatMessage>, isResponding: Boolean, responseStatus: String?, replyError: String?, playEntrance: Boolean, onEntranceStarted: () -> Unit, exitRequested: Boolean, onBack: () -> Unit, onExitComplete: () -> Unit, onSend: (String) -> Unit, onEditCharacter: () -> Unit, onAttachment: (String) -> Unit) {
+private fun ChatScreen(
+    character: Character,
+    userAvatarUri: String?,
+    messages: List<ChatMessage>,
+    isResponding: Boolean,
+    responseStatus: String?,
+    replyError: String?,
+    streamingText: String? = null,
+    playEntrance: Boolean,
+    onEntranceStarted: () -> Unit,
+    exitRequested: Boolean,
+    onBack: () -> Unit,
+    onExitComplete: () -> Unit,
+    onSend: (String) -> Unit,
+    onEditCharacter: () -> Unit,
+    onAttachment: (String) -> Unit,
+    onCancelReply: () -> Unit = {}
+) {
     var draft by remember { mutableStateOf("") }
     var entranceStarted by remember(character.id) { mutableStateOf(!playEntrance) }
     LaunchedEffect(playEntrance) {
@@ -771,6 +1157,27 @@ private fun ChatScreen(character: Character, userAvatarUri: String?, messages: L
             verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
             replyError?.let { error -> item("chat-error") { Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 4.dp)) } }
+            // Live SSE bubble — shows tokens as they arrive before the final multi-segment send.
+            streamingText?.takeIf { it.isNotBlank() }?.let { live ->
+                item("chat-stream") {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start, verticalAlignment = Alignment.Top) {
+                        Avatar(character.name, character.color, 34.dp, character.avatarUri)
+                        Spacer(Modifier.width(8.dp))
+                        Surface(
+                            color = MaterialTheme.colorScheme.surface,
+                            contentColor = MaterialTheme.colorScheme.onSurface,
+                            shape = RoundedCornerShape(18.dp),
+                            tonalElevation = 1.dp
+                        ) {
+                            Text(
+                                live + " ▍",
+                                Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                                style = MaterialTheme.typography.bodyLarge
+                            )
+                        }
+                    }
+                }
+            }
             if (isResponding) item("typing") { Text(responseStatus ?: "${character.name} 正在回复…", color = IslandMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 42.dp, top = 2.dp)) }
             items(messages.asReversed(), key = { it.id }) { message -> MessageBubble(message, character, userAvatarUri, message.id in newOutgoingMessageIds) }
         }
@@ -785,7 +1192,12 @@ private fun ChatScreen(character: Character, userAvatarUri: String?, messages: L
         ) {
             TextButton(onClick = { onAttachment("图片、文档与表情包导入将在下一阶段接入") }) { Text("＋") }
             OutlinedTextField(draft, { draft = it }, Modifier.weight(1f), placeholder = { Text("和${character.name}说点什么…") }, maxLines = 4, shape = RoundedCornerShape(20.dp))
-            Spacer(Modifier.width(8.dp)); Button(onClick = { onSend(draft); draft = "" }, enabled = draft.isNotBlank() && !isResponding, shape = RoundedCornerShape(18.dp)) { Text(if (isResponding) "回复中" else "发送") }
+            Spacer(Modifier.width(8.dp))
+            if (isResponding) {
+                OutlinedButton(onClick = onCancelReply, shape = RoundedCornerShape(18.dp)) { Text("停止") }
+            } else {
+                Button(onClick = { onSend(draft); draft = "" }, enabled = draft.isNotBlank(), shape = RoundedCornerShape(18.dp)) { Text("发送") }
+            }
         }
     }
     }
@@ -838,6 +1250,8 @@ private fun SettingsScreen(
     onOpenLogs: () -> Unit,
     hasSystemPermissions: Boolean,
     onRequestSystemPermissions: () -> Unit,
+    shizukuState: ShizukuClient.State,
+    onOpenShizuku: () -> Unit,
     onOpenProviders: () -> Unit,
     onSelectModel: (ModelType, String) -> Unit,
     modelNameCheckState: ModelNameCheckState,
@@ -887,6 +1301,39 @@ private fun SettingsScreen(
                 }
             }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors) { Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("系统权限", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(if (hasSystemPermissions) "日历、位置和通知已授权" else "允许读取日历、位置并发送通知", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; TextButton(onClick = onRequestSystemPermissions, enabled = !hasSystemPermissions) { Text(if (hasSystemPermissions) "已授权" else "去授权") } } } }
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = cardColors,
+                    modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenShizuku)
+                ) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("Shizuku 连接", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text(
+                                when (shizukuState) {
+                                    ShizukuClient.State.Ready -> "已连接 · 可用特权通道"
+                                    ShizukuClient.State.Connecting -> "正在连接用户服务…"
+                                    ShizukuClient.State.PermissionNeeded -> "服务就绪，等待授权"
+                                    ShizukuClient.State.PermissionDenied -> "权限被拒绝，点击处理"
+                                    ShizukuClient.State.WaitingForService -> "服务未运行，查看启动教程"
+                                    ShizukuClient.State.Dead -> "连接断开，点击重新连接"
+                                    ShizukuClient.State.NotInstalled -> "未安装 Shizuku，点击安装"
+                                },
+                                color = IslandMuted,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                        }
+                        Text(
+                            ShizukuClient.statusLabel(),
+                            color = if (shizukuState == ShizukuClient.State.Ready) IslandGreen else IslandMuted,
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue)
+                    }
+                }
+            }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenProviders)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("模型提供商", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(activeProvider?.let { "当前：${it.name} · 已导入 ${it.models.size} 个模型" } ?: "添加、切换与导入模型列表", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
             item { Text("模型配置", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, modifier = Modifier.padding(top = 4.dp)) }
             if (activeProvider == null) {
@@ -1094,6 +1541,383 @@ private fun ReplySplitterSettingsScreen(settings: ReplySplitterSettings, onBack:
             enabled = isValid,
             modifier = Modifier.fillMaxWidth().padding(bottom = 24.dp)
         ) { Text("保存分段器设置") }
+    }
+}
+
+@Composable
+private fun ShizukuScreen(
+    state: ShizukuClient.State,
+    statusDetail: String,
+    lastError: String?,
+    serverVersion: Int?,
+    privilegeUid: Int?,
+    testResult: String?,
+    isTesting: Boolean,
+    onBack: () -> Unit,
+    onRefresh: () -> Unit,
+    onPrimaryAction: () -> Unit,
+    onTest: () -> Unit,
+    onOpenShizukuApp: () -> Unit
+) {
+    val context = LocalContext.current
+    val isDark = isSystemInDarkTheme()
+    val cardColor = if (isDark) Color(0xFF17202E) else Color(0xFFF0F3F8)
+    val cardColors = CardDefaults.cardColors(containerColor = cardColor)
+    val statusColor = when (state) {
+        ShizukuClient.State.Ready -> IslandGreen
+        ShizukuClient.State.Connecting -> IslandBlue
+        ShizukuClient.State.PermissionNeeded -> Color(0xFFE6A23C)
+        ShizukuClient.State.PermissionDenied,
+        ShizukuClient.State.Dead -> MaterialTheme.colorScheme.error
+        ShizukuClient.State.NotInstalled,
+        ShizukuClient.State.WaitingForService -> IslandMuted
+    }
+
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            TextButton(onClick = onBack) { Text("‹ 返回") }
+            Text(
+                "Shizuku 连接",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.weight(1f)
+            )
+            TextButton(onClick = onRefresh) { Text("刷新") }
+        }
+        HorizontalDivider(color = IslandBlue.copy(alpha = 0.16f))
+
+        LazyColumn(
+            Modifier.fillMaxSize().padding(horizontal = 20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+            contentPadding = PaddingValues(vertical = 14.dp)
+        ) {
+            // ---- Status hero ----
+            item {
+                Card(shape = RoundedCornerShape(20.dp), colors = cardColors) {
+                    Column(Modifier.fillMaxWidth().padding(18.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                Modifier
+                                    .size(12.dp)
+                                    .clip(CircleShape)
+                                    .background(statusColor)
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                ShizukuClient.statusLabel(),
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = statusColor
+                            )
+                            Spacer(Modifier.weight(1f))
+                            Text(
+                                when (state) {
+                                    ShizukuClient.State.Ready -> "已就绪"
+                                    ShizukuClient.State.Connecting -> "连接中"
+                                    else -> "未就绪"
+                                },
+                                style = MaterialTheme.typography.labelMedium,
+                                color = statusColor
+                            )
+                        }
+                        Spacer(Modifier.height(10.dp))
+                        Text(statusDetail, style = MaterialTheme.typography.bodyMedium)
+                        lastError?.takeIf { state != ShizukuClient.State.Ready }?.let { err ->
+                            Spacer(Modifier.height(8.dp))
+                            Text(err, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        }
+                        Spacer(Modifier.height(12.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            InfoChip("权限", privilegeLabel(privilegeUid))
+                            InfoChip("服务端", serverVersion?.let { "v$it" } ?: "—")
+                            InfoChip("包名", ShizukuClient.SHIZUKU_PACKAGE.removePrefix("moe.shizuku.").ifEmpty { "shizuku" })
+                        }
+                    }
+                }
+            }
+
+            // ---- Primary actions ----
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp), modifier = Modifier.fillMaxWidth()) {
+                    Button(
+                        onClick = onPrimaryAction,
+                        enabled = state != ShizukuClient.State.Connecting && state != ShizukuClient.State.Ready,
+                        modifier = Modifier.weight(1f)
+                    ) { Text(primaryActionText(state)) }
+                    OutlinedButton(
+                        onClick = onOpenShizukuApp,
+                        enabled = state != ShizukuClient.State.NotInstalled,
+                        modifier = Modifier.weight(1f)
+                    ) { Text("打开 Shizuku") }
+                }
+            }
+
+            if (state == ShizukuClient.State.Ready) {
+                item {
+                    Card(shape = RoundedCornerShape(16.dp), colors = cardColors) {
+                        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                            Text("连接检测", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "以特权身份执行诊断命令，验证 UserService 是否可用。",
+                                color = IslandMuted,
+                                style = MaterialTheme.typography.bodySmall
+                            )
+                            Spacer(Modifier.height(10.dp))
+                            Button(onClick = onTest, enabled = !isTesting) {
+                                Text(if (isTesting) "检测中…" else "运行检测命令")
+                            }
+                            testResult?.let { result ->
+                                Spacer(Modifier.height(10.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(12.dp),
+                                    color = if (result.startsWith("检测成功")) IslandGreen.copy(alpha = 0.12f)
+                                    else MaterialTheme.colorScheme.error.copy(alpha = 0.10f)
+                                ) {
+                                    Text(
+                                        result,
+                                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- What is Shizuku ----
+            item {
+                Card(shape = RoundedCornerShape(16.dp), colors = cardColors) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                        Text("什么是 Shizuku", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Shizuku 可以在已 root 的设备上，或通过 ADB / 无线调试获得的 shell 权限下，" +
+                                "让本应用以更高系统权限运行。连接后，角色上下文与特权命令会更完整。",
+                            color = IslandMuted,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                }
+            }
+
+            item {
+                Text("连接教程", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            }
+            item {
+                Text(
+                    "按当前状态选择路径。首次使用建议按「安装 → 启动服务 → 授权」顺序完成。",
+                    color = IslandMuted,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+
+            // ---- Step 1 install ----
+            item {
+                TutorialStepCard(
+                    step = 1,
+                    title = "安装 Shizuku",
+                    highlighted = state == ShizukuClient.State.NotInstalled,
+                    cardColors = cardColors
+                ) {
+                    Text("1. 打开官方下载页：shizuku.rikka.app/download", style = MaterialTheme.typography.bodySmall)
+                    Text("2. 安装 APK，或从可信应用商店搜索「Shizuku」", style = MaterialTheme.typography.bodySmall)
+                    Text("3. 安装完成后回到本页点「刷新」", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(8.dp))
+                    TextButton(onClick = { ShizukuClient.openDownloadPage(context) }) { Text("打开下载页") }
+                }
+            }
+
+            // ---- Step 2 start service ----
+            item {
+                TutorialStepCard(
+                    step = 2,
+                    title = "启动 Shizuku 服务",
+                    highlighted = state == ShizukuClient.State.WaitingForService || state == ShizukuClient.State.Dead,
+                    cardColors = cardColors
+                ) {
+                    Text("三选一即可，推荐无线调试：", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(8.dp))
+                    Text("【方式 A · 无线调试，Android 11+】", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                    Text("1. 系统设置 → 开发者选项 → 打开「无线调试」", style = MaterialTheme.typography.bodySmall)
+                    Text("2. 打开 Shizuku →「配对」，按提示输入配对码（仅首次）", style = MaterialTheme.typography.bodySmall)
+                    Text("3. 在 Shizuku 首页点「启动」", style = MaterialTheme.typography.bodySmall)
+                    Text("4. 回到本页点「刷新」，状态应变为「待授权」", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(10.dp))
+                    Text("【方式 B · 电脑 ADB，需 USB 调试】", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                    Text("1. 手机开启开发者选项与 USB 调试，连接电脑", style = MaterialTheme.typography.bodySmall)
+                    Text("2. 在电脑终端执行下面命令（可复制）", style = MaterialTheme.typography.bodySmall)
+                    Text("3. 看到 shizuku_server 启动后，回本页点「刷新」", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(8.dp))
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Color(0xFF0F172A).copy(alpha = if (isDark) 0.55f else 0.92f)
+                    ) {
+                        Text(
+                            ShizukuClient.adbStartCommand(context),
+                            color = Color(0xFF9CC2FF),
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace),
+                            modifier = Modifier.fillMaxWidth().padding(12.dp)
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Row {
+                        TextButton(onClick = {
+                            val cmd = ShizukuClient.adbStartCommand(context)
+                            runCatching {
+                                context.getSystemService(android.content.ClipboardManager::class.java)
+                                    .setPrimaryClip(android.content.ClipData.newPlainText("shizuku-adb", cmd))
+                            }
+                        }) { Text("复制命令") }
+                        TextButton(onClick = onOpenShizukuApp) { Text("打开 Shizuku") }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    Text("【方式 C · 已 Root】", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                    Text("1. 打开 Shizuku → 点「通过 Root 启动」", style = MaterialTheme.typography.bodySmall)
+                    Text("2. 授权 su 后服务自动运行，回本页点「刷新」", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
+            // ---- Step 3 permission ----
+            item {
+                TutorialStepCard(
+                    step = 3,
+                    title = "授权本应用使用 Shizuku",
+                    highlighted = state == ShizukuClient.State.PermissionNeeded || state == ShizukuClient.State.PermissionDenied,
+                    cardColors = cardColors
+                ) {
+                    Text("1. 确认上一步服务已在运行（Shizuku 应用显示「Shizuku 正在运行」）", style = MaterialTheme.typography.bodySmall)
+                    Text("2. 在本页点下方「请求授权」按钮", style = MaterialTheme.typography.bodySmall)
+                    Text("3. 在弹出的 Shizuku 授权对话框中选择「允许」", style = MaterialTheme.typography.bodySmall)
+                    Text("4. 若曾选「拒绝且不再询问」，请到 Shizuku 应用中重置本应用权限后重试", style = MaterialTheme.typography.bodySmall)
+                    Spacer(Modifier.height(8.dp))
+                    Button(
+                        onClick = { ShizukuClient.requestPermission() },
+                        enabled = state == ShizukuClient.State.PermissionNeeded || state == ShizukuClient.State.PermissionDenied
+                    ) { Text("请求授权") }
+                }
+            }
+
+            // ---- Step 4 verify ----
+            item {
+                TutorialStepCard(
+                    step = 4,
+                    title = "验证连接",
+                    highlighted = state == ShizukuClient.State.Ready,
+                    cardColors = cardColors
+                ) {
+                    Text("1. 状态变为「已连接」", style = MaterialTheme.typography.bodySmall)
+                    Text("2. 权限芯片显示 ADB shell（uid 2000）或 ROOT（uid 0）", style = MaterialTheme.typography.bodySmall)
+                    Text("3. 点「运行检测命令」应输出 uid / 系统版本 / OK", style = MaterialTheme.typography.bodySmall)
+                    Text("4. 此后聊天注入的设备上下文会包含 Shizuku 状态", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+
+            // ---- FAQ ----
+            item {
+                Card(shape = RoundedCornerShape(16.dp), colors = cardColors) {
+                    Column(Modifier.fillMaxWidth().padding(16.dp)) {
+                        Text("常见问题", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(8.dp))
+                        FaqItem(
+                            "无线调试一直「正在搜索配对服务」",
+                            "允许 Shizuku 在后台运行；部分厂商需关闭省电限制。"
+                        )
+                        FaqItem(
+                            "ADB 启动后立刻退出 / 权限不足",
+                            "小米/POCO：开发者选项中额外开启「USB 调试（安全设置）」。"
+                        )
+                        FaqItem(
+                            "重启手机后要重新启动",
+                            "非 Root 的 ADB / 无线调试方式，每次重启后需重新启动 Shizuku 服务。"
+                        )
+                        FaqItem(
+                            "连接突然断开",
+                            "保持 USB 调试开启；开发者选项将 USB 用途改为「仅充电」；勿关闭无线调试。"
+                        )
+                    }
+                }
+            }
+
+            item { Spacer(Modifier.height(24.dp)) }
+        }
+    }
+}
+
+private fun privilegeLabel(uid: Int?): String = when (uid) {
+    0 -> "ROOT"
+    2000 -> "ADB shell"
+    null -> "—"
+    else -> "uid=$uid"
+}
+
+@Composable
+private fun primaryActionText(state: ShizukuClient.State): String = when (state) {
+    ShizukuClient.State.NotInstalled -> "去安装"
+    ShizukuClient.State.WaitingForService, ShizukuClient.State.Dead -> "打开并启动"
+    ShizukuClient.State.PermissionNeeded, ShizukuClient.State.PermissionDenied -> "请求授权"
+    ShizukuClient.State.Connecting -> "连接中…"
+    ShizukuClient.State.Ready -> "已连接"
+}
+
+@Composable
+private fun InfoChip(label: String, value: String) {
+    Surface(
+        shape = RoundedCornerShape(10.dp),
+        color = IslandBlue.copy(alpha = 0.10f)
+    ) {
+        Column(Modifier.padding(horizontal = 10.dp, vertical = 6.dp)) {
+            Text(label, style = MaterialTheme.typography.labelSmall, color = IslandMuted)
+            Text(value, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+private fun TutorialStepCard(
+    step: Int,
+    title: String,
+    highlighted: Boolean,
+    cardColors: CardColors,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(
+        shape = RoundedCornerShape(16.dp),
+        colors = if (highlighted) {
+            CardDefaults.cardColors(containerColor = IslandBlue.copy(alpha = 0.12f))
+        } else {
+            cardColors
+        }
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(
+                    Modifier
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(if (highlighted) IslandBlue else IslandMuted.copy(alpha = 0.35f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("$step", color = Color.White, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelLarge)
+                }
+                Spacer(Modifier.width(10.dp))
+                Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            }
+            Spacer(Modifier.height(10.dp))
+            content()
+        }
+    }
+}
+
+@Composable
+private fun FaqItem(question: String, answer: String) {
+    Column(Modifier.padding(vertical = 6.dp)) {
+        Text(question, fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+        Text(answer, color = IslandMuted, style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -1859,21 +2683,28 @@ private fun CharacterSettingsScreen(character: Character, onBack: () -> Unit, on
 }
 
 @Composable
-private fun AvatarCropScreen(sourceUri: String, onCancel: () -> Unit, onSave: (Bitmap) -> Unit) {
+private fun AvatarCropScreen(title: String, sourceUri: String, onCancel: () -> Unit, onSave: (Bitmap) -> Unit) {
     val context = LocalContext.current
     val cropView = remember(sourceUri) {
         AvatarCropView(context).apply {
-            val bytes = context.contentResolver.openInputStream(Uri.parse(sourceUri))?.use { it.readBytes() } ?: byteArrayOf()
+            val bytes = runCatching {
+                context.contentResolver.openInputStream(Uri.parse(sourceUri))?.use { it.readBytes() }
+            }.getOrNull() ?: byteArrayOf()
             if (bytes.isNotEmpty()) setImage(bytes)
         }
     }
     Column(Modifier.fillMaxSize().background(Color(0xFF101827))) {
         Row(Modifier.fillMaxWidth().height(58.dp).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
             TextButton(onClick = onCancel) { Text("取消", color = Color(0xFFAFCBFF)) }
-            Text("裁剪角色头像", color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            Text(title, color = Color.White, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
             TextButton(onClick = { cropView.croppedBitmap()?.let(onSave) }) { Text("确定", color = Color(0xFFAFCBFF)) }
         }
-        Text("拖动调整位置，双指缩放；圆形区域会保存为头像", color = Color.White.copy(alpha = 0.78f), style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp))
+        Text(
+            "拖动调整位置，双指缩放图片；圆形区域将保存为头像",
+            color = Color.White.copy(alpha = 0.78f),
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp)
+        )
         AndroidView(factory = { cropView }, modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp, vertical = 8.dp))
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 12.dp).navigationBarsPadding(),
