@@ -11,24 +11,35 @@ internal fun splitAssistantReply(
     val config = settings.normalized()
     val normalized = reply.replace("\r\n", "\n").trim()
     if (normalized.isBlank()) return emptyList()
-    val paragraphs = normalized.split(Regex("\\n\\s*\\n+")).map { it.trim() }.filter { it.isNotBlank() }
-    val lengthModeText = normalized.replace(Regex("\\s+"), " ").trim()
+    // Drop leftover SSE/JSON nulls that some providers emit as literal text.
+    // Keep blank lines so Scene mode can still split on paragraph boundaries.
+    val cleanedLines = normalized.lines().map { it.trim() }
+        .filterNot { it.equals("null", ignoreCase = true) || it.equals("undefined", ignoreCase = true) }
+    val cleaned = cleanedLines.joinToString("\n").trim()
+    if (cleaned.isBlank()) return emptyList()
+    val paragraphs = cleaned.split(Regex("\\n\\s*\\n+")).map { it.trim() }.filter {
+        it.isNotBlank() && !it.equals("null", ignoreCase = true)
+    }
+    val lengthModeText = cleaned.replace(Regex("\\s+"), " ").trim()
     val shouldKeepOneMessage = when (config.mode) {
         ReplySplitMode.Length -> lengthModeText.length <= config.maxSegmentLength
-        ReplySplitMode.Scene -> paragraphs.size == 1 && normalized.length <= config.maxSegmentLength
+        ReplySplitMode.Scene -> paragraphs.size == 1 && cleaned.length <= config.maxSegmentLength
     }
     if (shouldKeepOneMessage) return listOf(
-        if (config.mode == ReplySplitMode.Length) lengthModeText else normalized.replace('\n', ' ')
+        if (config.mode == ReplySplitMode.Length) lengthModeText else cleaned.replace('\n', ' ')
     )
 
     val segments = when (config.mode) {
         ReplySplitMode.Length -> splitReplyParagraph(lengthModeText, config)
         ReplySplitMode.Scene -> {
             if (paragraphs.size > 1) paragraphs.flatMap { paragraph -> splitReplyParagraph(paragraph, config) }
-            else splitReplyParagraph(normalized, config)
+            else splitReplyParagraph(cleaned, config)
         }
     }
-    return mergeReplySegmentsToLimit(segments, config.maxSegments).ifEmpty { listOf(normalized) }
+    return mergeReplySegmentsToLimit(segments, config.maxSegments)
+        .map { it.trim() }
+        .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+        .ifEmpty { listOf(cleaned) }
 }
 
 private fun splitReplyParagraph(paragraph: String, settings: ReplySplitterSettings): List<String> {

@@ -10,14 +10,18 @@ import org.json.JSONObject
 internal data class ChatSampling(
     val temperature: Float? = null,
     val topP: Float? = null,
-    val maxTokens: Int? = null
+    val maxTokens: Int? = null,
+    /** Ask the provider to enable its built-in web search when supported. */
+    val enableModelWebSearch: Boolean = false
 )
 
 /** Planner: tighter sampling so decisions stay structured. */
-internal fun plannerSampling() = ChatSampling(temperature = 0.2f, topP = 0.9f, maxTokens = 512)
+internal fun plannerSampling(enableModelWebSearch: Boolean = false) =
+    ChatSampling(temperature = 0.2f, topP = 0.9f, maxTokens = 512, enableModelWebSearch = enableModelWebSearch)
 
 /** Reply: more natural variation for companion dialogue. */
-internal fun replySampling() = ChatSampling(temperature = 0.85f, topP = 0.95f, maxTokens = 1024)
+internal fun replySampling(enableModelWebSearch: Boolean = false) =
+    ChatSampling(temperature = 0.85f, topP = 0.95f, maxTokens = 1024, enableModelWebSearch = enableModelWebSearch)
 
 /** Memory summarizer: factual, low variance. */
 internal fun memorySampling() = ChatSampling(temperature = 0.3f, topP = 0.9f, maxTokens = 1024)
@@ -80,6 +84,11 @@ internal object OpenAiClient {
         sampling?.topP?.let { put("top_p", it.toDouble()) }
         sampling?.maxTokens?.let { put("max_tokens", it) }
         if (stream) put("stream", true)
+        // Provider-native browsing (OpenAI-compatible field). Ignored by providers
+        // that do not implement it; the app-owned web_search tool still runs first.
+        if (sampling?.enableModelWebSearch == true) {
+            put("web_search_options", JSONObject())
+        }
     }
 
     private fun openChatConnection(provider: ApiProvider, payload: JSONObject): HttpURLConnection {
@@ -106,10 +115,37 @@ internal object OpenAiClient {
             val responseCode = connection.responseCode
             val body = (if (responseCode in 200..299) connection.inputStream else connection.errorStream)
                 ?.bufferedReader()?.use { it.readText() }.orEmpty()
-            if (responseCode !in 200..299) error("服务商返回 $responseCode：${body.take(160)}")
-            val message = JSONObject(body).optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
+            if (responseCode !in 200..299) error("服务商返回 $responseCode：${body.take(200)}")
+            val root = JSONObject(body)
+            val message = root.optJSONArray("choices")?.optJSONObject(0)?.optJSONObject("message")
                 ?: error("返回中没有 choices[0].message")
-            message.optString("content").trim().ifBlank { error("模型没有返回可显示的文本") }
+            var content = contentFieldToText(message.opt("content")).trim()
+            // Some reasoning models put the final answer under other keys when content is empty.
+            if (content.isBlank()) {
+                content = contentFieldToText(message.opt("text")).trim()
+            }
+            if (content.isBlank()) {
+                content = contentFieldToText(message.opt("reasoning_content")).trim()
+                    .takeIf { it.length >= 8 }
+                    ?.let { reason ->
+                        // Only use the tail of the reasoning as a last resort so the user
+                        // still sees something; mark it so it is obvious this is degraded.
+                        "（模型未输出正文，以下为思考摘要）\n" + reason.takeLast(300)
+                    }.orEmpty()
+            }
+            if (content.isBlank()) {
+                val finish = root.optJSONArray("choices")?.optJSONObject(0)?.optString("finish_reason")
+                val hasToolCall = message.optJSONArray("tool_calls") != null
+                error(
+                    buildString {
+                        append("模型没有返回可显示的文本")
+                        if (hasToolCall) append("；响应里只有 tool_calls")
+                        finish?.takeIf { it.isNotBlank() }?.let { append("；finish_reason=$it") }
+                        append("。body 片段：").append(body.take(120).replace('\n', ' '))
+                    }
+                )
+            }
+            content
         } finally {
             connection.disconnect()
         }
@@ -126,43 +162,134 @@ internal object OpenAiClient {
         sampling: ChatSampling? = null,
         onDelta: (String) -> Unit
     ): String {
+        val streamed = runCatching { streamOnce(provider, model, messages, sampling, onDelta) }
+            .getOrElse { err ->
+                // Empty body or broken SSE: fall back to a normal completion so the
+                // user still gets a reply instead of “模型没有返回可显示的文本”.
+                val fallback = runCatching { requestCompletion(provider, model, messages, sampling) }
+                if (fallback.isSuccess) {
+                    fallback.getOrThrow()
+                } else {
+                    throw err
+                }
+            }
+        if (streamed.isNotBlank()) return streamed
+        val fallback = requestCompletion(provider, model, messages, sampling)
+        return fallback.ifBlank { error("模型没有返回可显示的文本") }
+    }
+
+    private fun streamOnce(
+        provider: ApiProvider,
+        model: String,
+        messages: JSONArray,
+        sampling: ChatSampling?,
+        onDelta: (String) -> Unit
+    ): String {
         val connection = openChatConnection(provider, buildChatPayload(model, messages, sampling, stream = true))
         return try {
             val responseCode = connection.responseCode
             if (responseCode !in 200..299) {
                 val err = connection.errorStream?.bufferedReader()?.use { it.readText() }.orEmpty()
-                error("服务商返回 $responseCode：${err.take(160)}")
+                error("服务商返回 $responseCode：${err.take(200)}")
             }
             val full = StringBuilder()
+            val reasoning = StringBuilder()
             connection.inputStream?.bufferedReader()?.use { reader ->
                 var line = reader.readLine()
                 while (line != null) {
                     if (Thread.currentThread().isInterrupted) error("请求已取消")
                     val trimmed = line.trim()
-                    if (trimmed.startsWith("data:")) {
-                        val data = trimmed.removePrefix("data:").trim()
-                        if (data == "[DONE]") break
-                        if (data.isNotEmpty()) {
-                            val delta = runCatching {
-                                JSONObject(data)
-                                    .optJSONArray("choices")
-                                    ?.optJSONObject(0)
-                                    ?.optJSONObject("delta")
-                                    ?.optString("content")
-                                    .orEmpty()
-                            }.getOrDefault("")
-                            if (delta.isNotEmpty()) {
-                                full.append(delta)
-                                onDelta(delta)
+                    val data = when {
+                        trimmed.startsWith("data:") -> trimmed.removePrefix("data:").trim()
+                        trimmed.startsWith("{") && trimmed.contains("\"choices\"") -> trimmed
+                        else -> ""
+                    }
+                    if (data == "[DONE]") break
+                    if (data.isNotEmpty()) {
+                        val parsed = runCatching { parseStreamDelta(data) }.getOrNull()
+                        if (parsed != null) {
+                            if (parsed.content.isNotEmpty()) {
+                                full.append(parsed.content)
+                                onDelta(parsed.content)
                             }
+                            if (parsed.reasoning.isNotEmpty()) reasoning.append(parsed.reasoning)
                         }
                     }
                     line = reader.readLine()
                 }
             }
-            full.toString().trim().ifBlank { error("模型没有返回可显示的文本") }
+            val text = full.toString().trim()
+            if (text.isNotBlank()) return text
+            // Reasoning-only stream: treat as empty so caller can fall back to non-stream.
+            if (reasoning.isNotBlank()) {
+                error("模型流式只返回了思考过程，没有正文")
+            }
+            ""
         } finally {
             connection.disconnect()
+        }
+    }
+
+    private data class StreamDelta(val content: String, val reasoning: String)
+
+    private fun parseStreamDelta(payload: String): StreamDelta {
+        val root = JSONObject(payload)
+        if (root.has("error")) {
+            val message = root.optJSONObject("error")?.optString("message").orEmpty()
+            if (message.isNotBlank()) error(message)
+        }
+        val choice = root.optJSONArray("choices")?.optJSONObject(0) ?: return StreamDelta("", "")
+        val delta = choice.optJSONObject("delta") ?: choice.optJSONObject("message") ?: return StreamDelta("", "")
+        return StreamDelta(
+            content = contentFieldToText(delta.opt("content")),
+            reasoning = contentFieldToText(delta.opt("reasoning_content") ?: delta.opt("reasoning"))
+        )
+    }
+
+    /**
+     * Pulls display text from one SSE payload.
+     * Avoids `optString("content")` which can stringify JSON null as the literal "null"
+     * on some providers / org.json builds — that produced multiple “null” chat bubbles.
+     */
+    internal fun extractStreamContent(payload: String): String {
+        val root = JSONObject(payload)
+        // Error events mid-stream
+        if (root.has("error")) {
+            val message = root.optJSONObject("error")?.optString("message").orEmpty()
+            if (message.isNotBlank()) error(message)
+        }
+        val choice = root.optJSONArray("choices")?.optJSONObject(0) ?: return ""
+        val delta = choice.optJSONObject("delta") ?: choice.optJSONObject("message") ?: return ""
+        // Prefer content; ignore reasoning_content / thinking so chain-of-thought never leaks.
+        return contentFieldToText(delta.opt("content"))
+    }
+
+    private fun contentFieldToText(raw: Any?): String {
+        return when {
+            raw == null || raw === JSONObject.NULL -> ""
+            raw is String -> raw
+            raw is JSONArray -> buildString {
+                for (i in 0 until raw.length()) {
+                    when (val part = raw.opt(i)) {
+                        is String -> append(part)
+                        JSONObject.NULL, null -> Unit
+                        else -> {
+                            val text = part as? JSONObject
+                            if (text != null) {
+                                val t = text.optString("text")
+                                if (t.isNotEmpty() && t != "null") append(t)
+                            }
+                        }
+                    }
+                }
+            }
+            else -> {
+                val asText = raw.toString()
+                if (asText.equals("null", ignoreCase = true)) "" else asText
+            }
+        }.also { text ->
+            // Final guard: never surface the word "null" from a bad delta.
+            if (text.equals("null", ignoreCase = true)) return ""
         }
     }
 

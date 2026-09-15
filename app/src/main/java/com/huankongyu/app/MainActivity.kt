@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffColorFilter
@@ -25,13 +26,22 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.keyframes
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -48,11 +58,17 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
@@ -72,10 +88,8 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardColors
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -99,15 +113,31 @@ import kotlin.math.abs
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.TransformOrigin
+import androidx.compose.ui.zIndex
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.AccountCircle
+import androidx.compose.material.icons.filled.ChatBubbleOutline
+import androidx.compose.material.icons.filled.FavoriteBorder
+import androidx.compose.material.icons.filled.PeopleOutline
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
@@ -145,7 +175,61 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Prefer resize so the composer can track IME; keep keyboard mode explicit.
+        @Suppress("DEPRECATION")
+        window.setSoftInputMode(
+            android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE or
+                android.view.WindowManager.LayoutParams.SOFT_INPUT_STATE_HIDDEN
+        )
         setContent { HuankongyuApp() }
+    }
+
+    /**
+     * Takes over IME inset animation and finishes it in [durationMillis],
+     * so the keyboard UI snaps in/out faster than the system default (~250–300ms).
+     */
+    fun animateImeFaster(durationMillis: Long = 100L, show: Boolean = true) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+        val insetsController = androidx.core.view.WindowCompat.getInsetsController(window, window.decorView)
+        val type = androidx.core.view.WindowInsetsCompat.Type.ime()
+        runCatching {
+            insetsController.controlWindowInsetsAnimation(
+                type,
+                durationMillis,
+                null,
+                null,
+                object : androidx.core.view.WindowInsetsAnimationControlListenerCompat {
+                    override fun onReady(
+                        animationController: androidx.core.view.WindowInsetsAnimationControllerCompat,
+                        types: Int
+                    ) {
+                        runCatching {
+                            val target = if (show) {
+                                animationController.shownStateInsets
+                            } else {
+                                animationController.hiddenStateInsets
+                            }
+                            animationController.setInsetsAndAlpha(target, 1f, 1f)
+                            animationController.finish(show)
+                        }
+                    }
+
+                    override fun onFinished(animationController: androidx.core.view.WindowInsetsAnimationControllerCompat) = Unit
+
+                    override fun onCancelled(
+                        animationController: androidx.core.view.WindowInsetsAnimationControllerCompat?
+                    ) = Unit
+                }
+            )
+        }
+    }
+
+    /** Hide the IME with the same short inset animation used for show. */
+    fun hideImeFaster(durationMillis: Long = 90L) {
+        animateImeFaster(durationMillis, show = false)
+        androidx.core.view.WindowCompat.getInsetsController(window, window.decorView).hide(
+            androidx.core.view.WindowInsetsCompat.Type.ime()
+        )
     }
 }
 
@@ -160,18 +244,41 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
     val permissionPreferences = remember(context) { context.getSharedPreferences("system_permission_prompt", Context.MODE_PRIVATE) }
     var showPermissionRationale by remember { mutableStateOf(false) }
     var permissionStateVersion by remember { mutableStateOf(0) }
+    /** Remaining permission groups to request, ordered low → high risk. */
+    var pendingPermissionGroups by remember { mutableStateOf<List<List<AppPermission>>>(emptyList()) }
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        permissionPreferences.edit().putBoolean("shown", true).apply()
         permissionStateVersion += 1
+        // After a group is answered, continue with the next risk tier.
+        val next = pendingPermissionGroups.drop(1)
+        pendingPermissionGroups = next
+        if (next.isEmpty()) {
+            permissionPreferences.edit().putBoolean("shown", true).apply()
+        } else {
+            showPermissionRationale = true
+        }
     }
-    val requestSystemPermissions = {
-        val missing = missingSystemPermissions(context)
-        if (missing.isNotEmpty()) permissionLauncher.launch(missing)
+
+    fun startRiskAwarePermissionFlow() {
+        val missing = PermissionCatalog.missing(context)
+        if (missing.isEmpty()) {
+            showPermissionRationale = false
+            return
+        }
+        // Group by risk so we can explain High before requesting it.
+        val groups = listOf(
+            missing.filter { it.risk == PermissionRisk.Low },
+            missing.filter { it.risk == PermissionRisk.Medium },
+            missing.filter { it.risk == PermissionRisk.High }
+        ).filter { it.isNotEmpty() }
+        pendingPermissionGroups = groups
+        showPermissionRationale = true
     }
+
+    val requestSystemPermissions = { startRiskAwarePermissionFlow() }
     LaunchedEffect(Unit) { viewModel.initializeProviderStore(context) }
     LaunchedEffect(Unit) {
-        if (!permissionPreferences.getBoolean("shown", false) && missingSystemPermissions(context).isNotEmpty()) {
-            showPermissionRationale = true
+        if (!permissionPreferences.getBoolean("shown", false) && PermissionCatalog.missing(context).isNotEmpty()) {
+            startRiskAwarePermissionFlow()
         }
     }
     var pendingCharacterAvatarId by remember { mutableStateOf<String?>(null) }
@@ -273,17 +380,19 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
         ThemeMode.System -> systemInDarkTheme
     }
     val navigationSurface = if (darkTheme) NavigationSurfaceDark else NavigationSurfaceLight
-    val hasSystemPermissions = permissionStateVersion.let { missingSystemPermissions(context).isEmpty() }
+    val hasSystemPermissions = permissionStateVersion.let { PermissionCatalog.missing(context).isEmpty() }
     HuankongyuTheme(darkTheme = darkTheme) {
         val view = LocalView.current
+        // One source of truth for chrome + content background (IslandSurface / theme).
+        val pageChrome = MaterialTheme.colorScheme.background
         SideEffect {
             val window = (view.context as Activity).window
             WindowCompat.getInsetsController(window, view).apply {
                 isAppearanceLightStatusBars = !darkTheme
                 isAppearanceLightNavigationBars = !darkTheme
             }
-            window.statusBarColor = navigationSurface.toArgb()
-            window.navigationBarColor = navigationSurface.toArgb()
+            window.statusBarColor = pageChrome.toArgb()
+            window.navigationBarColor = android.graphics.Color.TRANSPARENT
         }
         BackHandler(enabled = viewModel.destination != Destination.Home || viewModel.selectedTab != HomeTab.Chats) {
             when {
@@ -291,6 +400,8 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                 viewModel.destination == Destination.ReplySplitter -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.ThemeMode -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.Shizuku -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
+                viewModel.destination == Destination.Memories -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
+                viewModel.userProfileVisible -> viewModel.closeUserProfile()
                 viewModel.destination == Destination.Providers -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.McpServers -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                 viewModel.destination == Destination.Logs -> { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
@@ -303,12 +414,22 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                 viewModel.selectedTab != HomeTab.Chats -> viewModel.selectedTab = HomeTab.Chats
             }
         }
+        Box(Modifier.fillMaxSize()) {
         Scaffold(
             snackbarHost = { SnackbarHost(snackbarHostState) },
-            bottomBar = { if (viewModel.destination == Destination.Home) AppNavigationBar(viewModel.selectedTab) { viewModel.selectedTab = it } },
+            bottomBar = {
+                // Dock stays on Home and while the profile overlay is open.
+                if (viewModel.destination == Destination.Home) {
+                    AppNavigationBar(viewModel.selectedTab) { viewModel.selectedTab = it }
+                }
+            },
             // With edge-to-edge enabled, Scaffold is visible behind the status bar.
             // Keep that area on the same navigation surface instead of leaving a pale gap.
-            containerColor = navigationSurface,
+            // Match content (IslandSurface) — NavigationSurfaceLight (#F0F3F8) left a
+            // visible residual strip under the dock vs page (#F7F9FF).
+            containerColor = pageChrome,
+            // Top status-bar inset only — dock owns the bottom inset.
+            contentWindowInsets = WindowInsets.statusBars.only(WindowInsetsSides.Top),
             // The navigation surface is a custom color, so Compose cannot infer a
             // matching foreground. Set it explicitly for readable dark-mode content.
             contentColor = MaterialTheme.colorScheme.onBackground
@@ -326,28 +447,50 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                 when (viewModel.destination) {
                     Destination.Home -> SwipeHomePager(
                         selectedTab = viewModel.selectedTab,
-                        onTabSelected = { viewModel.selectedTab = it },
+                        onTabSelected = { tab ->
+                            // Dock is live on the profile page too — switch and dismiss overlay.
+                            viewModel.selectedTab = tab
+                            if (viewModel.userProfileVisible) viewModel.closeUserProfile()
+                        },
+                        leftNeighbor = {
+                            UserProfileScreen(
+                                userName = viewModel.userName,
+                                userSignature = viewModel.userSignature,
+                                userAvatarUri = viewModel.userAvatarUri,
+                                onBack = { viewModel.closeUserProfile() },
+                                onEditAvatar = openAvatarPicker,
+                                onUserNameChange = viewModel::updateUserName,
+                                onUserSignatureChange = viewModel::updateUserSignature
+                            )
+                        },
+                        onConfirmLeftNeighbor = { viewModel.openUserProfile(fromSwipe = true) },
                         content = { tab ->
                             when (tab) {
-                                HomeTab.Chats -> HomeScreen(viewModel.userName, viewModel.userSignature, viewModel.characters, viewModel.userAvatarUri, { viewModel.selectedTab = HomeTab.Contacts }, viewModel::openChat, viewModel::togglePinned, viewModel::deleteCharacter)
+                                HomeTab.Chats -> HomeScreen(
+                                    viewModel.userName,
+                                    viewModel.userSignature,
+                                    viewModel.characters,
+                                    viewModel.userAvatarUri,
+                                    { viewModel.selectedTab = HomeTab.Contacts },
+                                    viewModel::openChat,
+                                    viewModel::togglePinned,
+                                    viewModel::deleteCharacter,
+                                    onOpenUserProfile = viewModel::openUserProfile
+                                )
                                 HomeTab.Contacts -> ContactsScreen(viewModel.characters, { viewModel.destination = Destination.CreateCharacter }, viewModel::openChat)
                                 HomeTab.Me -> SettingsScreen(
                                     activeProvider = viewModel.activeProvider(),
                                     selectedModels = viewModel.selectedModels,
-                                    userName = viewModel.userName,
-                                    userSignature = viewModel.userSignature,
-                                    userAvatarUri = viewModel.userAvatarUri,
+                                    onToggleModelWebSearch = viewModel::setAllowModelWebSearch,
                                     themeMode = viewModel.themeMode,
                                     replySplitterSettings = viewModel.replySplitterSettings,
                                     mcpServers = viewModel.mcpServers,
-                                    onEditAvatar = openAvatarPicker,
-                                    onUserNameChange = viewModel::updateUserName,
-                                    onUserSignatureChange = viewModel::updateUserSignature,
                                     onOpenGlobalPrompt = { viewModel.destination = Destination.GlobalPrompt },
                                     onOpenReplySplitter = { viewModel.destination = Destination.ReplySplitter },
                                     onOpenThemeMode = { viewModel.destination = Destination.ThemeMode },
                                     onOpenMcpServers = { viewModel.destination = Destination.McpServers },
                                     onOpenLogs = viewModel::openLogs,
+                                    onOpenMemories = viewModel::openMemoriesPage,
                                     hasSystemPermissions = hasSystemPermissions,
                                     onRequestSystemPermissions = requestSystemPermissions,
                                     shizukuState = viewModel.shizukuState,
@@ -426,7 +569,13 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                         character = viewModel.selectedCharacter(),
                         onBack = { viewModel.destination = Destination.Chat },
                         onEditAvatar = { openCharacterAvatarPicker(viewModel.selectedCharacterId) },
-                        onEditPrompt = { viewModel.destination = Destination.EditCharacter }
+                        onEditPrompt = { viewModel.destination = Destination.EditCharacter },
+                        onToggleStreaming = { enabled ->
+                            viewModel.setCharacterStreamingEnabled(viewModel.selectedCharacterId, enabled)
+                        },
+                        onToggleMemory = { enabled ->
+                            viewModel.setCharacterMemoryEnabled(viewModel.selectedCharacterId, enabled)
+                        }
                     )
                     Destination.AvatarCrop -> viewModel.avatarCropRequest?.let { request -> AvatarCropScreen(
                         title = if (request.characterId == null) "裁剪我的头像" else "裁剪角色头像",
@@ -504,6 +653,17 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                         isLoading = viewModel.isLoadingLogs,
                         onBack = { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
                     )
+                    Destination.Memories -> MemoriesScreen(
+                        hasEmbeddingModel = viewModel.selectedModels.embedding != null,
+                        memories = viewModel.longTermMemories,
+                        characters = viewModel.characters,
+                        userName = viewModel.userName,
+                        userAvatarUri = viewModel.userAvatarUri,
+                        latestChatAt = viewModel::latestChatAtForMemory,
+                        onConfigureEmbedding = { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me },
+                        onOpenScope = viewModel::openMemoryScope,
+                        onBack = { viewModel.destination = Destination.Home; viewModel.selectedTab = HomeTab.Me }
+                    )
                     Destination.MemoryDetails -> {
                         val scopeId = viewModel.selectedMemoryScope
                         if (scopeId != null) {
@@ -540,32 +700,185 @@ private fun HuankongyuApp(viewModel: AppViewModel = viewModel()) {
                         }
                     }
                 }
+                // Profile covers home content only — dock remains visible above.
+                if (viewModel.userProfileVisible && viewModel.destination == Destination.Home) {
+                    UserProfileOverlay(
+                        enterFromSwipe = viewModel.profileEnterFromSwipe,
+                        userName = viewModel.userName,
+                        userSignature = viewModel.userSignature,
+                        userAvatarUri = viewModel.userAvatarUri,
+                        onEditAvatar = openAvatarPicker,
+                        onUserNameChange = viewModel::updateUserName,
+                        onUserSignatureChange = viewModel::updateUserSignature,
+                        onDismiss = viewModel::closeUserProfile
+                    )
+                }
             }
         }
-        if (showPermissionRationale) {
+        if (showPermissionRationale && pendingPermissionGroups.isNotEmpty()) {
+            val group = pendingPermissionGroups.first()
+            val risk = group.first().risk
+            val high = group.filter { it.risk == PermissionRisk.High }
             AlertDialog(
-                onDismissRequest = { showPermissionRationale = false; permissionPreferences.edit().putBoolean("shown", true).apply() },
-                title = { Text("授予系统权限") },
-                text = { Text("允许后，幻空屿可以读取日历中的时间和地点、使用当前位置，并向你发送通知。日期、日历标题/地点与位置会在你发消息时提供给当前选择的模型服务。读取系统时间本身不需要授权。") },
+                onDismissRequest = {
+                    showPermissionRationale = false
+                    pendingPermissionGroups = emptyList()
+                    permissionPreferences.edit().putBoolean("shown", true).apply()
+                },
+                title = {
+                    Text(
+                        when (risk) {
+                            PermissionRisk.Low -> "申请低风险权限"
+                            PermissionRisk.Medium -> "申请中风险权限"
+                            PermissionRisk.High -> "申请高风险权限"
+                        }
+                    )
+                },
+                text = {
+                    Column {
+                        Text(
+                            when (risk) {
+                                PermissionRisk.Low -> "这些权限风险较低，用于基础体验。"
+                                PermissionRisk.Medium -> "请确认用途后再允许。"
+                                PermissionRisk.High -> "以下权限涉及位置、日历或相机，仅在你明确需要时才会调用，数据不会上传到我们的服务器。"
+                            },
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        group.forEach { p ->
+                            Text("· ${p.title}（${p.risk.label}）", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodySmall)
+                            Text(p.reason, color = IslandMuted, style = MaterialTheme.typography.bodySmall)
+                            if (p.tools.isNotEmpty()) {
+                                Text("可解锁工具：${p.tools.joinToString()}", color = IslandMuted, style = MaterialTheme.typography.labelSmall)
+                            }
+                            Spacer(Modifier.height(6.dp))
+                        }
+                        if (high.isNotEmpty()) {
+                            Text(
+                                "高风险项若暂不确定，可点「跳过本组」，之后仍可在「我 → 系统权限」中开启。",
+                                color = MaterialTheme.colorScheme.error,
+                                style = MaterialTheme.typography.labelSmall
+                            )
+                        }
+                    }
+                },
                 confirmButton = {
                     TextButton(onClick = {
                         showPermissionRationale = false
-                        permissionPreferences.edit().putBoolean("shown", true).apply()
-                        requestSystemPermissions()
-                    }) { Text("继续授权") }
+                        permissionLauncher.launch(group.map { it.permission }.toTypedArray())
+                    }) { Text("继续申请") }
                 },
-                dismissButton = { TextButton(onClick = { showPermissionRationale = false; permissionPreferences.edit().putBoolean("shown", true).apply() }) { Text("暂不") } }
+                dismissButton = {
+                    TextButton(onClick = {
+                        // Skip this risk tier and try the next, if any.
+                        val rest = pendingPermissionGroups.drop(1)
+                        pendingPermissionGroups = rest
+                        if (rest.isEmpty()) {
+                            showPermissionRationale = false
+                            permissionPreferences.edit().putBoolean("shown", true).apply()
+                        }
+                    }) { Text("跳过本组") }
+                }
+            )
+        }
+        } // outer Box
+    } // theme
+}
+
+/**
+ * Profile overlay inside Scaffold content (dock stays visible above).
+ * Enter/exit both move along the same axis as the LTR pager cover:
+ * sheet comes in from the left and leaves to the left.
+ */
+@Composable
+private fun UserProfileOverlay(
+    enterFromSwipe: Boolean,
+    userName: String,
+    userSignature: String,
+    userAvatarUri: String?,
+    onEditAvatar: () -> Unit,
+    onUserNameChange: (String) -> Unit,
+    onUserSignatureChange: (String) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var widthPx by remember { mutableStateOf(1f) }
+    // 0 = fully covering content; -1 = fully off-screen to the left (same as swipe cover).
+    val enter = remember { Animatable(if (enterFromSwipe) 0f else -1f) }
+    var dragX by remember { mutableStateOf(0f) }
+    val settleX = remember { Animatable(0f) }
+    var isSettling by remember { mutableStateOf(false) }
+    val background = MaterialTheme.colorScheme.background
+
+    LaunchedEffect(Unit) {
+        if (enter.value != 0f) enter.animateTo(0f, tween(230))
+    }
+
+    val dragState = rememberDraggableState { delta ->
+        if (!isSettling) {
+            dragX = (dragX + delta).coerceAtMost(0f)
+        }
+    }
+    val displayX = if (isSettling) settleX.value else dragX
+
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onSizeChanged { widthPx = it.width.toFloat().coerceAtLeast(1f) }
+            .background(background)
+    ) {
+        Box(
+            Modifier
+                .fillMaxSize()
+                .draggable(
+                    state = dragState,
+                    orientation = Orientation.Horizontal,
+                    onDragStopped = { velocity ->
+                        scope.launch {
+                            val threshold = widthPx * 0.18f
+                            val shouldExit = dragX <= -threshold || velocity <= -900f
+                            isSettling = true
+                            settleX.snapTo(dragX)
+                            if (shouldExit) {
+                                settleX.animateTo(-widthPx, tween(200))
+                                dragX = 0f
+                                isSettling = false
+                                onDismiss()
+                            } else {
+                                settleX.animateTo(0f, tween(160))
+                                dragX = 0f
+                                isSettling = false
+                            }
+                        }
+                        true
+                    }
+                )
+                .graphicsLayer {
+                    // Cover-in from the left; drag/exit also go left — same as swipe.
+                    translationX = enter.value * size.width + displayX
+                }
+                .background(background)
+        ) {
+            UserProfileScreen(
+                userName = userName,
+                userSignature = userSignature,
+                userAvatarUri = userAvatarUri,
+                onBack = {
+                    scope.launch {
+                        isSettling = true
+                        settleX.snapTo(0f)
+                        settleX.animateTo(-widthPx, tween(200))
+                        isSettling = false
+                        onDismiss()
+                    }
+                },
+                onEditAvatar = onEditAvatar,
+                onUserNameChange = onUserNameChange,
+                onUserSignatureChange = onUserSignatureChange
             )
         }
     }
 }
-
-private fun missingSystemPermissions(context: Context): Array<String> = buildList {
-    if (ContextCompat.checkSelfPermission(context, Manifest.permission.READ_CALENDAR) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.READ_CALENDAR)
-    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.ACCESS_COARSE_LOCATION)
-    if (ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.ACCESS_FINE_LOCATION)
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) add(Manifest.permission.POST_NOTIFICATIONS)
-}.toTypedArray()
 
 /**
  * Two-layer swipe pager for the four home tabs.
@@ -581,6 +894,8 @@ private fun missingSystemPermissions(context: Context): Array<String> = buildLis
 private fun SwipeHomePager(
     selectedTab: HomeTab,
     onTabSelected: (HomeTab) -> Unit,
+    leftNeighbor: (@Composable () -> Unit)? = null,
+    onConfirmLeftNeighbor: () -> Unit = {},
     content: @Composable (HomeTab) -> Unit
 ) {
     val tabs = HomeTab.entries
@@ -623,16 +938,16 @@ private fun SwipeHomePager(
                             (dragX <= -offsetThreshold || velocity <= -velocityThreshold)
                         val goPrev = index > 0 &&
                             (dragX >= offsetThreshold || velocity >= velocityThreshold)
+                        val openLeft = index == 0 && leftNeighbor != null &&
+                            (dragX >= offsetThreshold || velocity >= velocityThreshold)
                         val target = when {
                             goNext -> -viewportWidth
-                            goPrev -> viewportWidth
+                            goPrev || openLeft -> viewportWidth
                             else -> 0f
                         }
-                        // Start settle from the exact finger position — no velocity-based
-                        // position boost (that produced a visible jump, especially LTR).
                         isSettling = true
                         settleAnim.snapTo(dragX)
-                        settleAnim.animateTo(target, tween(if (goNext || goPrev) 230 else 184))
+                        settleAnim.animateTo(target, tween(if (goNext || goPrev || openLeft) 230 else 184))
                         dragX = target
                         isSettling = false
                         isDragging = false
@@ -641,6 +956,9 @@ private fun SwipeHomePager(
                             dragX = 0f
                         } else if (goPrev) {
                             onTabSelected(tabs[index - 1])
+                            dragX = 0f
+                        } else if (openLeft) {
+                            onConfirmLeftNeighbor()
                             dragX = 0f
                         }
                     }
@@ -667,13 +985,11 @@ private fun SwipeHomePager(
             else -> 0f
         }
 
-        // Warm the previous page on drag start so LTR doesn't hitch; only compose
-        // the next page while actually swiping left (otherwise it would peek when
-        // the current page shrinks during a cover).
         val showNext = goingForward && currentIndex < tabs.lastIndex
         val showPrev = (goingBack || isDragging) && currentIndex > 0
+        val showLeftNeighbor = leftNeighbor != null && currentIndex == 0 &&
+            (goingBack || (isDragging && offset > 0f))
 
-        // Layer 1 — next page underlay (revealed when swiping left).
         if (showNext && currentIndex < tabs.lastIndex) {
             Box(Modifier.fillMaxSize()) {
                 Box(
@@ -697,14 +1013,11 @@ private fun SwipeHomePager(
             }
         }
 
-        // Layer 2 — current page.
-        // RTL: it is the top sheet and slides left.
-        // LTR: it stays put under the incoming previous page and shrinks.
         Box(
             Modifier
                 .fillMaxSize()
                 .graphicsLayer {
-                    if (goingBack) {
+                    if ((goingBack && currentIndex > 0) || showLeftNeighbor) {
                         scaleX = underScale
                         scaleY = underScale
                     } else {
@@ -716,7 +1029,7 @@ private fun SwipeHomePager(
             content(tabs[currentIndex])
         }
 
-        if (goingBack) {
+        if ((goingBack && currentIndex > 0) || showLeftNeighbor) {
             Box(
                 Modifier
                     .fillMaxSize()
@@ -724,7 +1037,6 @@ private fun SwipeHomePager(
             )
         }
 
-        // Layer 3 — previous page covers from the left (LTR only).
         if (showPrev && currentIndex > 0) {
             val prevTranslation = -width + offset.coerceAtLeast(0f)
             Box(
@@ -740,39 +1052,213 @@ private fun SwipeHomePager(
             ) {
                 content(tabs[currentIndex - 1])
             }
+        } else if (showLeftNeighbor && leftNeighbor != null) {
+            val leftTranslation = -width + offset.coerceAtLeast(0f)
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        translationX = leftTranslation
+                        shadowElevation = 16.dp.toPx()
+                        shape = RoundedCornerShape(0.dp)
+                        clip = false
+                    }
+                    .background(background)
+            ) {
+                leftNeighbor()
+            }
         }
     }
 }
 
 @Composable
 private fun AppNavigationBar(selectedTab: HomeTab, onSelect: (HomeTab) -> Unit) {
-    val items = listOf(HomeTab.Chats to ("聊" to "聊天"), HomeTab.Contacts to ("人" to "通讯录"), HomeTab.Me to ("我" to "我"), HomeTab.Memories to ("忆" to "记忆库"))
-    val unselectedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f)
-    NavigationBar(
-        // Slightly taller bar + top padding on glyphs ≈ 1mm of surface above “聊”.
-        modifier = Modifier.height(72.dp),
-        containerColor = navigationSurfaceColor(),
-        tonalElevation = 0.dp
+    data class DockTab(val tab: HomeTab, val icon: ImageVector, val label: String)
+
+    val items = listOf(
+        DockTab(HomeTab.Chats, Icons.Filled.ChatBubbleOutline, "聊天"),
+        DockTab(HomeTab.Contacts, Icons.Filled.PeopleOutline, "通讯录"),
+        DockTab(HomeTab.Me, Icons.Filled.Settings, "系统"),
+        // Heart stays visible but is not a route target for now.
+        DockTab(HomeTab.Memories, Icons.Filled.FavoriteBorder, "记忆库")
+    )
+    val navigable = setOf(HomeTab.Chats, HomeTab.Contacts, HomeTab.Me)
+    val panelHeight = 68.dp
+    val baseItemSize = 50.dp
+    val magnification = 70.dp
+    // Two explicit dock skins driven by the app theme (HuankongyuTheme),
+    // not isSystemInDarkTheme — Light/Dark/System in-app all stay consistent.
+    val appDark = MaterialTheme.colorScheme.background.red < 0.2f
+    val dockPanel: Color
+    val dockShadow: Color
+    if (appDark) {
+        // Dark-mode dock
+        dockPanel = Color(0xFF2A3344)
+        dockShadow = Color.Black.copy(alpha = 0.40f)
+    } else {
+        // Light-mode dock
+        dockPanel = Color.White
+        dockShadow = Color.Black.copy(alpha = 0.12f)
+    }
+    val unselectedColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f)
+    val dockChrome = navigationSurfaceColor()
+
+    var hoverRootX by remember { mutableStateOf<Float?>(null) }
+    var dockOriginX by remember { mutableStateOf(0f) }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .background(dockChrome)
+            // Paint the system gesture strip with the same chrome color.
+            .windowInsetsPadding(WindowInsets.navigationBars.only(WindowInsetsSides.Bottom))
     ) {
-        items.forEach { (tab, label) ->
-            val selected = selectedTab == tab
-            NavigationBarItem(
-                selected = selected,
-                onClick = { onSelect(tab) },
-                icon = {
-                    Box(Modifier.padding(top = 4.dp)) {
-                        NavigationGlyph(label.first, selected, if (selected) IslandBlue else unselectedColor)
-                    }
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(panelHeight + 12.dp)
+                // Clip so the white dock's drop shadow cannot tint the gesture inset below.
+                .clipToBounds()
+                .onGloballyPositioned { coords ->
+                    dockOriginX = coords.boundsInRoot().topLeft.x
+                }
+                .pointerInput(items) {
+                    detectHorizontalDragGestures(
+                        onDragStart = { offset -> hoverRootX = dockOriginX + offset.x },
+                        onDragEnd = { hoverRootX = null },
+                        onDragCancel = { hoverRootX = null },
+                        onHorizontalDrag = { change, _ ->
+                            change.consume()
+                            hoverRootX = dockOriginX + change.position.x
+                        }
+                    )
                 },
-                label = { Text(label.second, color = if (selected) IslandBlue else unselectedColor) },
-                colors = NavigationBarItemDefaults.colors(
-                    indicatorColor = Color.Transparent,
-                    selectedIconColor = IslandBlue,
-                    unselectedIconColor = unselectedColor,
-                    selectedTextColor = IslandBlue,
-                    unselectedTextColor = unselectedColor
-                )
+            contentAlignment = Alignment.Center
+        ) {
+            // Solid white bar with a soft drop shadow (clipped above).
+            Box(
+                Modifier
+                    .padding(horizontal = 12.dp, vertical = 8.dp)
+                    .fillMaxWidth()
+                    .height(panelHeight)
+                    .shadow(
+                        elevation = 8.dp,
+                        shape = RoundedCornerShape(24.dp),
+                        clip = false,
+                        ambientColor = dockShadow,
+                        spotColor = dockShadow
+                    )
+                    .clip(RoundedCornerShape(24.dp))
+                    .background(dockPanel)
+            ) {
+                Row(
+                    Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    items.forEach { item ->
+                        val isSelected = selectedTab == item.tab
+                        val canNavigate = item.tab in navigable
+                        DockItem(
+                            icon = item.icon,
+                            label = item.label,
+                            selected = isSelected,
+                            baseSize = baseItemSize,
+                            maxSize = magnification,
+                            color = if (isSelected) IslandBlue
+                            else unselectedColor.copy(alpha = if (canNavigate) 1f else 0.45f),
+                            hoverRootX = hoverRootX,
+                            onClick = { if (canNavigate) onSelect(item.tab) }
+                        )
+                    }
+                }
+            }
+        }
+        // Inset is already applied via windowInsetsPadding on the Column.
+    }
+}
+
+@Composable
+private fun DockItem(
+    icon: ImageVector,
+    label: String,
+    selected: Boolean,
+    baseSize: Dp,
+    maxSize: Dp,
+    color: Color,
+    hoverRootX: Float?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val density = LocalDensity.current
+    var centerRootX by remember { mutableStateOf(0f) }
+    val basePx = with(density) { baseSize.toPx() }
+    val maxPx = with(density) { maxSize.toPx() }
+    val influencePx = basePx * 1.35f
+    val interactionSource = remember { MutableInteractionSource() }
+
+    val hoverScale = if (hoverRootX == null) {
+        1f
+    } else {
+        val dist = abs(centerRootX - hoverRootX)
+        if (dist >= influencePx) 1f
+        else {
+            val t = 1f - dist / influencePx
+            val boost = t * t * (3f - 2f * t)
+            1f + (maxPx / basePx - 1f) * boost
+        }
+    }
+    // Selected item stays enlarged (click-to-zoom); hover can push slightly further.
+    val selectedBoost = if (selected) maxPx / basePx else 1f
+    val targetScale = maxOf(selectedBoost, hoverScale)
+    val scale by animateFloatAsState(
+        targetValue = targetScale,
+        animationSpec = spring(dampingRatio = 0.75f, stiffness = Spring.StiffnessMediumLow),
+        label = "dockItemScale"
+    )
+
+    Column(
+        modifier = modifier
+            .width(maxSize)
+            // indication = null → no ripple / click shadow
+            .clickable(
+                interactionSource = interactionSource,
+                indication = null,
+                onClick = onClick
             )
+            .onGloballyPositioned { coords ->
+                centerRootX = coords.boundsInRoot().center.x
+            },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Bottom
+    ) {
+        Box(
+            Modifier
+                .height(maxSize)
+                .width(maxSize),
+            contentAlignment = Alignment.BottomCenter
+        ) {
+            Box(
+                Modifier
+                    .size(baseSize)
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        transformOrigin = TransformOrigin(0.5f, 1f)
+                        // Explicitly no shadow.
+                        shadowElevation = 0f
+                    },
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = label,
+                    tint = color,
+                    modifier = Modifier.size(26.dp)
+                )
+            }
         }
     }
 }
@@ -883,8 +1369,12 @@ private fun CompactHeader(title: String, trailing: (@Composable () -> Unit)? = n
         contentColor = MaterialTheme.colorScheme.onSurface,
         shadowElevation = 0.dp
     ) {
+        // Top inset is applied by Scaffold; don't pad again here.
         Column {
-            Row(Modifier.fillMaxWidth().height(36.dp).padding(horizontal = 20.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.fillMaxWidth().height(44.dp).padding(horizontal = 20.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(Modifier.weight(1f))
                 trailing?.invoke()
@@ -895,11 +1385,28 @@ private fun CompactHeader(title: String, trailing: (@Composable () -> Unit)? = n
 }
 
 @Composable
-private fun navigationSurfaceColor(): Color =
-    if (MaterialTheme.colorScheme.background.red < 0.2f) NavigationSurfaceDark else NavigationSurfaceLight
+private fun navigationSurfaceColor(): Color = MaterialTheme.colorScheme.background
+
+/** Shared card skins for all elevated panels (profile / settings / character). */
+@Composable
+private fun islandCardColors(): CardColors {
+    val isDark = MaterialTheme.colorScheme.background.red < 0.2f
+    val container = if (isDark) Color(0xFF17202E) else Color(0xFFF0F3F8)
+    return CardDefaults.cardColors(containerColor = container)
+}
 
 @Composable
-private fun HomeScreen(userName: String, userSignature: String, characters: List<Character>, userAvatarUri: String?, onOpenContacts: () -> Unit, onOpenChat: (String) -> Unit, onTogglePinned: (String) -> Unit, onDelete: (String) -> Unit) {
+private fun HomeScreen(
+    userName: String,
+    userSignature: String,
+    characters: List<Character>,
+    userAvatarUri: String?,
+    onOpenContacts: () -> Unit,
+    onOpenChat: (String) -> Unit,
+    onTogglePinned: (String) -> Unit,
+    onDelete: (String) -> Unit,
+    onOpenUserProfile: () -> Unit = {}
+) {
     var pendingDelete by remember { mutableStateOf<Character?>(null) }
     Column(Modifier.fillMaxSize()) {
         Surface(
@@ -907,13 +1414,27 @@ private fun HomeScreen(userName: String, userSignature: String, characters: List
             contentColor = MaterialTheme.colorScheme.onSurface,
             shadowElevation = 0.dp
         ) {
+            // Scaffold already pads top for the status bar.
             Column {
-                // 42dp avatar + symmetric 8dp breathing room above and below.
-                Row(Modifier.fillMaxWidth().height(58.dp).padding(horizontal = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                    ShakingUserAvatar(userAvatarUri, 42.dp)
-                    Spacer(Modifier.width(12.dp))
-                    Column(Modifier.weight(1f)) {
-                        Text(userName, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                // Compact header with a little breathing room under the status bar.
+                Row(
+                    Modifier.fillMaxWidth().height(64.dp).padding(start = 16.dp, end = 16.dp, top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    ShakingUserAvatar(
+                        userAvatarUri,
+                        44.dp,
+                        onClick = onOpenUserProfile
+                    )
+                    Spacer(Modifier.width(14.dp))
+                    Column(Modifier.weight(1f).clickable(onClick = onOpenUserProfile)) {
+                        Text(
+                            userName,
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                         Text(
                             userSignature,
                             style = MaterialTheme.typography.labelSmall,
@@ -1068,23 +1589,10 @@ private fun ChatScreen(
 ) {
     var draft by remember { mutableStateOf("") }
     var entranceStarted by remember(character.id) { mutableStateOf(!playEntrance) }
-    LaunchedEffect(playEntrance) {
-        if (playEntrance) {
-            entranceStarted = true
-            onEntranceStarted()
-        }
-    }
     val listState = rememberLazyListState()
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
-    LaunchedEffect(exitRequested) {
-        if (exitRequested) {
-            keyboardController?.hide()
-            focusManager.clearFocus(force = true)
-            delay(260)
-            onExitComplete()
-        }
-    }
+    val hostActivity = LocalContext.current as? MainActivity
     var knownMessageCount by remember(character.id) { mutableStateOf(messages.size) }
     // In a reversed chat list, item zero is the newest message and is laid out
     // against the composer from the very first frame. This avoids the visible
@@ -1092,39 +1600,55 @@ private fun ChatScreen(
     var displayedNewestMessageId by remember(character.id) { mutableStateOf(messages.lastOrNull()?.id) }
     var wasResponding by remember(character.id) { mutableStateOf(isResponding) }
     var wasImeVisible by remember(character.id) { mutableStateOf(false) }
-    val newOutgoingMessageIds = if (messages.size > knownMessageCount) {
-        messages.drop(knownMessageCount).filter { it.fromUser }.map { it.id }.toSet()
-    } else {
-        emptySet()
+    val newOutgoingMessageIds = remember(messages.size, knownMessageCount) {
+        if (messages.size > knownMessageCount) {
+            messages.drop(knownMessageCount).filter { it.fromUser }.map { it.id }.toSet()
+        } else {
+            emptySet()
+        }
     }
     LaunchedEffect(messages.size) { knownMessageCount = messages.size }
-    val density = LocalDensity.current
-    val imeBottom = WindowInsets.ime.getBottom(density)
-    val imeVisible = imeBottom > 0
-    // Only scroll after a genuinely new event or after the keyboard opens. Do not run
-    // an initial scroll when this screen first appears: that was the source of the jump.
-    LaunchedEffect(messages.lastOrNull()?.id, isResponding, imeVisible) {
+    // Keyboard visibility is handled by imePadding() on the composer only.
+    // Avoid reading IME insets in composition — that recomposed the whole chat
+    // on every keyboard animation frame.
+    LaunchedEffect(messages.lastOrNull()?.id, isResponding) {
         val newestMessageId = messages.lastOrNull()?.id
         val shouldAnchor =
             (newestMessageId != null && newestMessageId != displayedNewestMessageId) ||
-                (isResponding && !wasResponding) ||
-                (imeVisible && !wasImeVisible)
-        if (shouldAnchor) listState.animateScrollToItem(0)
+                (isResponding && !wasResponding)
+        if (shouldAnchor) listState.scrollToItem(0)
         displayedNewestMessageId = newestMessageId
         wasResponding = isResponding
-        wasImeVisible = imeVisible
     }
-    BoxWithConstraints(Modifier.fillMaxSize()) {
-        val entranceOffset by animateDpAsState(
-            targetValue = when {
-                exitRequested -> maxWidth
-                entranceStarted -> 0.dp
-                else -> maxWidth
-            },
-            animationSpec = tween(durationMillis = 260),
-            label = "chatPageEntrance"
-        )
-    Column(Modifier.fillMaxSize().offset(x = entranceOffset)) {
+    // Entrance/exit uses a raw Animatable instead of BoxWithConstraints + animateDpAsState:
+    // BoxWithConstraints re-measures the whole chat tree and is a common fling jank source.
+    val entrancePx = remember { Animatable(0f) }
+    LaunchedEffect(exitRequested) {
+        if (exitRequested) {
+            hostActivity?.hideImeFaster()
+            keyboardController?.hide()
+            focusManager.clearFocus(force = true)
+            entrancePx.animateTo(4000f, tween(260))
+            onExitComplete()
+        }
+    }
+    LaunchedEffect(playEntrance) {
+        if (playEntrance) {
+            entrancePx.snapTo(4000f)
+            entrancePx.animateTo(0f, tween(260))
+            entranceStarted = true
+            onEntranceStarted()
+        } else {
+            entrancePx.snapTo(0f)
+        }
+    }
+    // Do NOT put imePadding on the root column: it fights the entrance slide and
+    // forces a full-layout pass on every IME frame. Only the composer lifts.
+    Column(
+        Modifier
+            .fillMaxSize()
+            .graphicsLayer { translationX = entrancePx.value }
+    ) {
         Surface(color = navigationSurfaceColor()) {
             Row(
                 Modifier.fillMaxWidth().height(38.dp).padding(horizontal = 14.dp),
@@ -1140,22 +1664,20 @@ private fun ChatScreen(
             }
         }
         HorizontalDivider(color = IslandBlue.copy(alpha = 0.16f))
-        val conversationModifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp).then(
-            if (imeBottom > 0) {
-                Modifier.pointerInput(Unit) {
-                    detectTapGestures(onTap = {
-                        focusManager.clearFocus(force = true)
-                        keyboardController?.hide()
-                    })
-                }
-            } else Modifier
-        )
-        LazyColumn(
-            state = listState,
-            modifier = conversationModifier,
-            reverseLayout = true,
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
+        // No pointerInput here: detectTapGestures on the list steals fling time-slices
+        // and made fast scroll drop frames.
+        val conversationModifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)
+    // Stable reversed snapshot — avoids rebuilding list identity every streaming frame.
+    val reversedMessages = remember(messages.size, messages.lastOrNull()?.id) {
+        messages.asReversed().toList()
+    }
+    val outgoingIds = newOutgoingMessageIds
+    LazyColumn(
+        state = listState,
+        modifier = conversationModifier,
+        reverseLayout = true,
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
             replyError?.let { error -> item("chat-error") { Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 4.dp)) } }
             // Live SSE bubble — shows tokens as they arrive before the final multi-segment send.
             streamingText?.takeIf { it.isNotBlank() }?.let { live ->
@@ -1178,20 +1700,60 @@ private fun ChatScreen(
                     }
                 }
             }
-            if (isResponding) item("typing") { Text(responseStatus ?: "${character.name} 正在回复…", color = IslandMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 42.dp, top = 2.dp)) }
-            items(messages.asReversed(), key = { it.id }) { message -> MessageBubble(message, character, userAvatarUri, message.id in newOutgoingMessageIds) }
+            if (isResponding) item("typing") { ModelStatusRow(character = character, status = responseStatus) }
+            items(
+                count = reversedMessages.size,
+                key = { index -> reversedMessages[index].id },
+                contentType = { "chat_message" }
+            ) { index ->
+                val message = reversedMessages[index]
+                MessageBubble(
+                    message = message,
+                    character = character,
+                    userAvatarUri = userAvatarUri,
+                    animateEntry = message.id in outgoingIds
+                )
+            }
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.6f))
+        val composerScope = rememberCoroutineScope()
+        val chatContext = LocalContext.current
+        val activity = chatContext as? MainActivity
+        val focusRequester = remember { FocusRequester() }
         Row(
             Modifier.fillMaxWidth()
-                .navigationBarsPadding()
                 .imePadding()
+                .navigationBarsPadding()
                 .background(MaterialTheme.colorScheme.surface)
                 .padding(10.dp),
             verticalAlignment = Alignment.Bottom
         ) {
             TextButton(onClick = { onAttachment("图片、文档与表情包导入将在下一阶段接入") }) { Text("＋") }
-            OutlinedTextField(draft, { draft = it }, Modifier.weight(1f), placeholder = { Text("和${character.name}说点什么…") }, maxLines = 4, shape = RoundedCornerShape(20.dp))
+            OutlinedTextField(
+                draft,
+                { draft = it },
+                Modifier
+                    .weight(1f)
+                    .focusRequester(focusRequester)
+                    .pointerInput(Unit) {
+                        detectTapGestures {
+                            // Show IME immediately on tap and force a short inset animation.
+                            activity?.animateImeFaster(90L)
+                            focusRequester.requestFocus()
+                            keyboardController?.show()
+                            composerScope.launch { listState.scrollToItem(0) }
+                        }
+                    }
+                    .onFocusChanged { state ->
+                        if (state.isFocused) {
+                            activity?.animateImeFaster(90L)
+                            composerScope.launch { listState.scrollToItem(0) }
+                        }
+                    },
+                placeholder = { Text("和${character.name}说点什么…") },
+                maxLines = 4,
+                shape = RoundedCornerShape(20.dp)
+            )
             Spacer(Modifier.width(8.dp))
             if (isResponding) {
                 OutlinedButton(onClick = onCancelReply, shape = RoundedCornerShape(18.dp)) { Text("停止") }
@@ -1200,33 +1762,203 @@ private fun ChatScreen(
             }
         }
     }
+}
+
+/** Live model/tool status while the character is preparing a reply. */
+@Composable
+private fun ModelStatusRow(character: Character, status: String?) {
+    val label = status ?: "思考中…"
+    // Soft pulse so the row feels alive without being noisy.
+    val pulse by rememberInfiniteTransition(label = "modelStatusPulse").animateFloat(
+        initialValue = 0.35f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse),
+        label = "pulseAlpha"
+    )
+    Row(
+        Modifier.fillMaxWidth().padding(start = 0.dp, top = 2.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.Top
+    ) {
+        Avatar(character.name, character.color, 34.dp, character.avatarUri)
+        Spacer(Modifier.width(8.dp))
+        Surface(
+            color = MaterialTheme.colorScheme.surface,
+            contentColor = IslandMuted,
+            shape = RoundedCornerShape(18.dp),
+            tonalElevation = 1.dp
+        ) {
+            Row(
+                Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Pulse via graphicsLayer so we don't recompose the whole status row each frame.
+                Box(
+                    Modifier
+                        .size(8.dp)
+                        .clip(CircleShape)
+                        .background(IslandBlue)
+                        .graphicsLayer { alpha = pulse }
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "${character.name} · $label",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = IslandMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+        }
     }
 }
 
 @Composable
 private fun MessageBubble(message: ChatMessage, character: Character, userAvatarUri: String?, animateEntry: Boolean = false) {
-    var isVisible by remember(message.id) { mutableStateOf(!animateEntry) }
-    LaunchedEffect(animateEntry) { if (animateEntry) isVisible = true }
-    val alpha by animateFloatAsState(if (isVisible) 1f else 0f, animationSpec = tween(150), label = "messageAlpha")
-    val scale by animateFloatAsState(if (isVisible) 1f else 0.88f, animationSpec = tween(190), label = "messageScale")
-    val entryOffset by animateDpAsState(if (isVisible) 0.dp else 18.dp, animationSpec = tween(190), label = "messageOffset")
+    // Non-animated path has zero animate* state objects — critical for 30+ item flings.
+    if (!animateEntry) {
+        StaticMessageBubble(message, character, userAvatarUri)
+        return
+    }
+    var isVisible by remember(message.id) { mutableStateOf(false) }
+    LaunchedEffect(message.id) { isVisible = true }
+    val alpha by animateFloatAsState(targetValue = if (isVisible) 1f else 0f, animationSpec = tween(150), label = "messageAlpha")
+    val scale by animateFloatAsState(targetValue = if (isVisible) 1f else 0.88f, animationSpec = tween(190), label = "messageScale")
+    val entryOffset by animateDpAsState(targetValue = if (isVisible) 0.dp else 18.dp, animationSpec = tween(190), label = "messageOffset")
     Row(
-        Modifier.fillMaxWidth().offset(x = if (message.fromUser) entryOffset else 0.dp).graphicsLayer {
-            this.alpha = alpha
-            scaleX = scale
-            scaleY = scale
-        },
+        Modifier.fillMaxWidth()
+            .offset(x = if (message.fromUser) entryOffset else 0.dp)
+            .graphicsLayer {
+                this.alpha = alpha
+                scaleX = scale
+                scaleY = scale
+            },
         horizontalArrangement = if (message.fromUser) Arrangement.End else Arrangement.Start,
         verticalAlignment = Alignment.Top
     ) {
-        if (!message.fromUser) { Avatar(character.name, character.color, 34.dp, character.avatarUri); Spacer(Modifier.width(8.dp)) }
-        Column(horizontalAlignment = if (message.fromUser) Alignment.End else Alignment.Start) {
-            Surface(color = if (message.fromUser) IslandBlue else MaterialTheme.colorScheme.surface, contentColor = if (message.fromUser) Color.White else MaterialTheme.colorScheme.onSurface, shape = RoundedCornerShape(18.dp), tonalElevation = if (message.fromUser) 0.dp else 1.dp) {
-                SelectionContainer { Text(message.content, Modifier.padding(horizontal = 14.dp, vertical = 10.dp), style = MaterialTheme.typography.bodyLarge) }
-            }
-            Text(message.time, Modifier.padding(top = 3.dp), style = MaterialTheme.typography.labelSmall, color = IslandMuted)
+        MessageBubbleContent(message, character, userAvatarUri)
+    }
+}
+
+@Composable
+private fun StaticMessageBubble(message: ChatMessage, character: Character, userAvatarUri: String?) {
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (message.fromUser) Arrangement.End else Arrangement.Start,
+        verticalAlignment = Alignment.Top
+    ) {
+        MessageBubbleContent(message, character, userAvatarUri)
+    }
+}
+
+@Composable
+private fun MessageBubbleContent(message: ChatMessage, character: Character, userAvatarUri: String?) {
+    if (!message.fromUser) {
+        Avatar(character.name, character.color, 34.dp, character.avatarUri)
+        Spacer(Modifier.width(8.dp))
+    }
+    Column(horizontalAlignment = if (message.fromUser) Alignment.End else Alignment.Start) {
+        Surface(
+            color = if (message.fromUser) IslandBlue else MaterialTheme.colorScheme.surface,
+            contentColor = if (message.fromUser) Color.White else MaterialTheme.colorScheme.onSurface,
+            shape = RoundedCornerShape(18.dp),
+            tonalElevation = 0.dp
+        ) {
+            Text(
+                message.content,
+                Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                style = MaterialTheme.typography.bodyLarge
+            )
         }
-        if (message.fromUser) { Spacer(Modifier.width(8.dp)); UserAvatar(userAvatarUri, onClick = null, size = 34.dp) }
+        Text(message.time, Modifier.padding(top = 3.dp), style = MaterialTheme.typography.labelSmall, color = IslandMuted)
+    }
+    if (message.fromUser) {
+        Spacer(Modifier.width(8.dp))
+        UserAvatar(userAvatarUri, onClick = null, size = 34.dp)
+    }
+}
+
+@Composable
+private fun UserProfileScreen(
+    userName: String,
+    userSignature: String,
+    userAvatarUri: String?,
+    onBack: () -> Unit,
+    onEditAvatar: () -> Unit,
+    onUserNameChange: (String) -> Unit,
+    onUserSignatureChange: (String) -> Unit
+) {
+    val cardColors = islandCardColors()
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        // CompactHeader without extra status inset — this column already pads top.
+        Surface(color = navigationSurfaceColor()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("‹ 返回", color = IslandBlue, modifier = Modifier.clickable(onClick = onBack).padding(vertical = 6.dp, horizontal = 4.dp))
+                Text(
+                    "我的资料",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f).padding(start = 12.dp)
+                )
+                TextButton(onClick = onBack) { Text("完成") }
+            }
+        }
+        HorizontalDivider(color = IslandBlue.copy(alpha = 0.16f))
+        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            item {
+                Card(shape = RoundedCornerShape(20.dp), colors = cardColors) {
+                    Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
+                        UserAvatar(userAvatarUri, onEditAvatar, 64.dp)
+                        Spacer(Modifier.width(14.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("头像", fontWeight = FontWeight.Bold)
+                            Text("点按从相册更换，可圆形裁剪", color = IslandMuted, style = MaterialTheme.typography.bodySmall)
+                        }
+                        TextButton(onClick = onEditAvatar) { Text("更换") }
+                    }
+                }
+            }
+            item {
+                Card(shape = RoundedCornerShape(16.dp), colors = cardColors) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                        Text("用户名", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = userName,
+                            onValueChange = onUserNameChange,
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text("所有角色将这样称呼你") }
+                        )
+                    }
+                }
+            }
+            item {
+                Card(shape = RoundedCornerShape(16.dp), colors = cardColors) {
+                    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                        Text("签名", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Spacer(Modifier.height(6.dp))
+                        OutlinedTextField(
+                            value = userSignature,
+                            onValueChange = onUserSignatureChange,
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true,
+                            label = { Text("显示在首页用户名下方") },
+                            supportingText = { Text("最多 $MAX_USER_SIGNATURE_LENGTH 个字符") }
+                        )
+                    }
+                }
+            }
+            item {
+                Text(
+                    "系统设置请点 Dock 齿轮图标；本页仅保存个人资料。",
+                    color = IslandMuted,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
     }
 }
 
@@ -1234,20 +1966,16 @@ private fun MessageBubble(message: ChatMessage, character: Character, userAvatar
 private fun SettingsScreen(
     activeProvider: ApiProvider?,
     selectedModels: SelectedModels,
-    userName: String,
-    userSignature: String,
-    userAvatarUri: String?,
+    onToggleModelWebSearch: (Boolean) -> Unit,
     themeMode: ThemeMode,
     replySplitterSettings: ReplySplitterSettings,
     mcpServers: List<McpServer>,
-    onEditAvatar: () -> Unit,
-    onUserNameChange: (String) -> Unit,
-    onUserSignatureChange: (String) -> Unit,
     onOpenGlobalPrompt: () -> Unit,
     onOpenReplySplitter: () -> Unit,
     onOpenThemeMode: () -> Unit,
     onOpenMcpServers: () -> Unit,
     onOpenLogs: () -> Unit,
+    onOpenMemories: () -> Unit,
     hasSystemPermissions: Boolean,
     onRequestSystemPermissions: () -> Unit,
     shizukuState: ShizukuClient.State,
@@ -1263,18 +1991,30 @@ private fun SettingsScreen(
     val isDarkNow = themeMode == ThemeMode.Dark ||
         (themeMode == ThemeMode.System && isSystemInDarkTheme())
     val settingsCardColor = if (isDarkNow) Color(0xFF17202E) else Color(0xFFF0F3F8)
-    val cardColors = CardDefaults.cardColors(containerColor = settingsCardColor)
+    val cardColors = islandCardColors()
     Column(Modifier.fillMaxSize()) {
-        CompactHeader("我")
+        CompactHeader("系统设置")
         Spacer(Modifier.height(8.dp))
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            item { Card(shape = RoundedCornerShape(20.dp), colors = cardColors) { Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) { UserAvatar(userAvatarUri, onEditAvatar, 58.dp); Spacer(Modifier.width(14.dp)); Column(Modifier.weight(1f)) { Text("我的头像", fontWeight = FontWeight.Bold); Text("点按头像可从相册更换", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; TextButton(onClick = onEditAvatar) { Text("编辑") } } } }
-            item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors) { Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) { Text("用户名", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(6.dp)); OutlinedTextField(value = userName, onValueChange = onUserNameChange, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("所有角色将这样称呼你") }) } } }
-            item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors) { Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp)) { Text("签名", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(6.dp)); OutlinedTextField(value = userSignature, onValueChange = onUserSignatureChange, modifier = Modifier.fillMaxWidth(), singleLine = true, label = { Text("显示在首页用户名下方") }, supportingText = { Text("最多 $MAX_USER_SIGNATURE_LENGTH 个字符") }) } } }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenGlobalPrompt)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("全局计划规范", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text("设置何时回应、回应目标和通用决策规则；不读取角色人格", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenReplySplitter)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("回复分段器", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text("${replySplitterSettings.mode.label} · 最多 ${replySplitterSettings.maxSegments} 条 · 每条 ${replySplitterSettings.minSegmentLength}-${replySplitterSettings.maxSegmentLength} 字", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenMcpServers)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("外部 MCP 工具", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(if (mcpServers.isEmpty()) "添加可信任的 HTTP MCP 服务" else "${mcpServers.count { it.enabled }} 个已启用，${mcpServers.sumOf { it.tools.size }} 个工具", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
             item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors, modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenLogs)) { Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("开发日志", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text("查看运行、模型、规划、回复及错误警告记录", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) } } }
+            item {
+                Card(
+                    shape = RoundedCornerShape(16.dp),
+                    colors = cardColors,
+                    modifier = Modifier.fillMaxWidth().clickable(onClick = onOpenMemories)
+                ) {
+                    Row(Modifier.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text("记忆库", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                            Text("查看与管理角色长期记忆、全局档案", color = IslandMuted, style = MaterialTheme.typography.bodySmall)
+                        }
+                        Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue)
+                    }
+                }
+            }
             item {
                 Card(
                     shape = RoundedCornerShape(16.dp),
@@ -1300,7 +2040,7 @@ private fun SettingsScreen(
                     }
                 }
             }
-            item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors) { Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("系统权限", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(if (hasSystemPermissions) "日历、位置和通知已授权" else "允许读取日历、位置并发送通知", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; TextButton(onClick = onRequestSystemPermissions, enabled = !hasSystemPermissions) { Text(if (hasSystemPermissions) "已授权" else "去授权") } } } }
+            item { Card(shape = RoundedCornerShape(16.dp), colors = cardColors) { Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("系统权限", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(if (hasSystemPermissions) "日历、位置、相机等已按需授权" else "按风险分级申请：通知/位置/日历/相机/照片", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; TextButton(onClick = onRequestSystemPermissions, enabled = !hasSystemPermissions) { Text(if (hasSystemPermissions) "已授权" else "去授权") } } } }
             item {
                 Card(
                     shape = RoundedCornerShape(16.dp),
@@ -1341,6 +2081,27 @@ private fun SettingsScreen(
             } else {
                 item { Text("当前使用 ${activeProvider.name}；可从导入列表搜索，或手动验证模型名称。", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }
                 items(ModelType.entries) { type -> ModelSelectionCard(type, selectedModels.modelFor(type), cardColors) { pickerType = type } }
+                item {
+                    Card(shape = RoundedCornerShape(16.dp), colors = cardColors) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("模型自带联网搜索", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                                Text(
+                                    "开启后请求会带上服务商的 web_search_options；应用内 web_search 仍会先尝试。不支持的服务商会忽略该字段。",
+                                    color = IslandMuted,
+                                    style = MaterialTheme.typography.bodySmall
+                                )
+                            }
+                            Switch(
+                                checked = selectedModels.allowModelWebSearch,
+                                onCheckedChange = onToggleModelWebSearch
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -1377,7 +2138,7 @@ private fun ProviderManagementScreen(
         } else {
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(providers, key = { it.id }) { provider ->
-                    Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Card(shape = RoundedCornerShape(18.dp), colors = islandCardColors()) {
                         Column(Modifier.padding(16.dp)) {
                             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                                 Column(Modifier.weight(1f)) {
@@ -2006,7 +2767,7 @@ private fun LogsScreen(logs: List<AppLogEntry>, isLoading: Boolean, onBack: () -
             LazyColumn(Modifier.fillMaxSize().padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 item { Text("仅显示进入此页面前 5 分钟内的开发诊断日志", color = IslandMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 14.dp, bottom = 4.dp)) }
                 items(logs, key = { "${it.timestamp}-${it.message}" }) { entry ->
-                    Card(shape = RoundedCornerShape(14.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                    Card(shape = RoundedCornerShape(14.dp), colors = islandCardColors()) {
                         Row(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.Top) {
                             Text(formatLogTimestamp(entry.timestamp), color = IslandMuted, style = MaterialTheme.typography.labelMedium)
                             Spacer(Modifier.width(12.dp))
@@ -2038,12 +2799,12 @@ private fun McpServersScreen(servers: List<McpServer>, onBack: () -> Unit, onAdd
                 Text("仅添加你信任的 HTTP MCP 服务。启用后，规划器可在用户明确请求时调用其已导入工具；工具可能访问或修改外部数据。", color = IslandMuted, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
             }
             if (servers.isEmpty()) item {
-                Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Card(shape = RoundedCornerShape(16.dp), colors = islandCardColors()) {
                     Column(Modifier.padding(16.dp)) { Text("还没有外部 MCP 服务器", fontWeight = FontWeight.SemiBold); Spacer(Modifier.height(6.dp)); Text("填写服务提供的 Streamable HTTP 地址，例如 https://example.com/mcp。", color = IslandMuted, style = MaterialTheme.typography.bodySmall); Spacer(Modifier.height(10.dp)); Button(onClick = { showAddDialog = true }) { Text("添加服务器") } }
                 }
             }
             items(servers, key = { it.id }) { server ->
-                Card(shape = RoundedCornerShape(16.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+                Card(shape = RoundedCornerShape(16.dp), colors = islandCardColors()) {
                     Column(Modifier.padding(16.dp)) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             Column(Modifier.weight(1f)) { Text(server.name, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text(server.endpoint, color = IslandMuted, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis) }
@@ -2112,9 +2873,7 @@ private fun formatMemoryCardTime(timestamp: Long?): String = timestamp?.let {
 /** Matches the low-contrast settings cards in both supported themes. */
 @Composable
 private fun memoryCardColors(): CardColors {
-    val isDark = MaterialTheme.colorScheme.background.red < 0.2f
-    val container = if (isDark) Color(0xFF17202E) else Color(0xFFF0F3F8)
-    return CardDefaults.cardColors(containerColor = container)
+    return islandCardColors()
 }
 
 private fun memoryEditNote(memory: LongTermMemory): String? = runCatching {
@@ -2130,10 +2889,20 @@ private fun MemoriesScreen(
     userAvatarUri: String?,
     latestChatAt: (String) -> Long?,
     onConfigureEmbedding: () -> Unit,
-    onOpenScope: (String) -> Unit
+    onOpenScope: (String) -> Unit,
+    onBack: () -> Unit = {}
 ) {
     Column(Modifier.fillMaxSize()) {
-        CompactHeader("记忆库")
+        Surface(color = navigationSurfaceColor()) {
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                TextButton(onClick = onBack) { Text("‹ 返回") }
+                Text("记忆库", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            }
+        }
+        HorizontalDivider(color = IslandBlue.copy(alpha = 0.16f))
         LazyColumn(
             Modifier.weight(1f).padding(horizontal = 20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
@@ -2654,11 +3423,18 @@ private fun EditCharacterScreen(character: Character, onBack: () -> Unit, onSave
 }
 
 @Composable
-private fun CharacterSettingsScreen(character: Character, onBack: () -> Unit, onEditAvatar: () -> Unit, onEditPrompt: () -> Unit) {
+private fun CharacterSettingsScreen(
+    character: Character,
+    onBack: () -> Unit,
+    onEditAvatar: () -> Unit,
+    onEditPrompt: () -> Unit,
+    onToggleStreaming: (Boolean) -> Unit,
+    onToggleMemory: (Boolean) -> Unit
+) {
     Column(Modifier.fillMaxSize()) {
         CompactHeader("角色设置") { TextButton(onClick = onBack) { Text("完成") } }
         Column(Modifier.padding(horizontal = 20.dp, vertical = 18.dp)) {
-            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)) {
+            Card(shape = RoundedCornerShape(18.dp), colors = islandCardColors()) {
                 Row(Modifier.fillMaxWidth().padding(18.dp), verticalAlignment = Alignment.CenterVertically) {
                     Avatar(
                         character.name,
@@ -2675,8 +3451,50 @@ private fun CharacterSettingsScreen(character: Character, onBack: () -> Unit, on
                 }
             }
             Spacer(Modifier.height(14.dp))
-            Card(shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant), modifier = Modifier.fillMaxWidth().clickable(onClick = onEditPrompt)) {
+            Card(shape = RoundedCornerShape(18.dp), colors = islandCardColors(), modifier = Modifier.fillMaxWidth().clickable(onClick = onEditPrompt)) {
                 Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("角色提示词", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold); Text("编辑身份、性格、行为方式和表达方式", color = IslandMuted, style = MaterialTheme.typography.bodySmall) }; Text("›", style = MaterialTheme.typography.headlineSmall, color = IslandBlue) }
+            }
+            Spacer(Modifier.height(14.dp))
+            Card(shape = RoundedCornerShape(18.dp), colors = islandCardColors()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("流式输出", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (character.streamingEnabled) "回复边生成边显示，体感更快"
+                            else "等整段生成完再一次性显示",
+                            color = IslandMuted,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(
+                        checked = character.streamingEnabled,
+                        onCheckedChange = onToggleStreaming
+                    )
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+            Card(shape = RoundedCornerShape(18.dp), colors = islandCardColors()) {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("长期记忆", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (character.memoryEnabled) "静默后自动总结，并在相关时召回；关闭后不再读写该角色记忆"
+                            else "已关闭：不会写入或召回该角色的长期记忆",
+                            color = IslandMuted,
+                            style = MaterialTheme.typography.bodySmall
+                        )
+                    }
+                    Switch(
+                        checked = character.memoryEnabled,
+                        onCheckedChange = onToggleMemory
+                    )
+                }
             }
         }
     }
@@ -2872,7 +3690,24 @@ private fun ModelPickerDialog(
 private fun UserAvatar(avatarUri: String?, onClick: (() -> Unit)?, size: Dp, modifier: Modifier = Modifier) {
     val clickModifier = if (onClick == null) Modifier else Modifier.clickable(onClick = onClick)
     Box(modifier.size(size).clip(CircleShape).background(IslandBlue).then(clickModifier), contentAlignment = Alignment.Center) {
-        if (avatarUri == null) Text("我", color = Color.White, fontWeight = FontWeight.Bold) else AndroidView(factory = { context -> ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER_CROP } }, update = { imageView -> imageView.setImageURI(Uri.parse(avatarUri)) }, modifier = Modifier.fillMaxSize())
+        if (avatarUri == null) {
+            Text("我", color = Color.White, fontWeight = FontWeight.Bold)
+        } else {
+            // Reuse one ImageView; only reload when the URI actually changes (fling-safe).
+            val parsedUri = remember(avatarUri) { Uri.parse(avatarUri) }
+            AndroidView(
+                factory = { context ->
+                    ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER_CROP }
+                },
+                update = { imageView ->
+                    if (imageView.tag != avatarUri) {
+                        imageView.tag = avatarUri
+                        imageView.setImageURI(parsedUri)
+                    }
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+        }
     }
 }
 
@@ -2892,9 +3727,9 @@ private val pinyinInitialBoundaries = listOf(
     52218 to 'T', 52698 to 'W', 52980 to 'X', 53689 to 'Y', 54481 to 'Z'
 )
 
-/** The home avatar is a playful, non-navigation control. Edit it from the "我" tab instead. */
+/** Home header avatar: shake on tap, then open the user profile (negative-one screen). */
 @Composable
-private fun ShakingUserAvatar(avatarUri: String?, size: Dp, modifier: Modifier = Modifier) {
+private fun ShakingUserAvatar(avatarUri: String?, size: Dp, modifier: Modifier = Modifier, onClick: () -> Unit = {}) {
     var shakeCount by remember { mutableStateOf(0) }
     val horizontalOffset = remember { Animatable(0f) }
     LaunchedEffect(shakeCount) {
@@ -2914,17 +3749,59 @@ private fun ShakingUserAvatar(avatarUri: String?, size: Dp, modifier: Modifier =
     }
     UserAvatar(
         avatarUri = avatarUri,
-        onClick = { shakeCount += 1 },
+        onClick = {
+            shakeCount += 1
+            onClick()
+        },
         size = size,
         modifier = modifier.offset(x = horizontalOffset.value.dp)
     )
 }
 
+/** Small shared bitmap cache so fling does not re-decode avatars via AndroidView. */
+private object AvatarBitmapCache {
+    private val cache = object : LruCache<String, Bitmap>(24) {}
+    private val decodeBounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    private val decodeOpts = BitmapFactory.Options().apply { inPreferredConfig = Bitmap.Config.RGB_565 }
+
+    fun load(context: Context, uriString: String): Bitmap? {
+        cache.get(uriString)?.let { return it }
+        return runCatching {
+            val uri = Uri.parse(uriString)
+            val resolver = context.contentResolver
+            resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, decodeBounds) }
+            var sample = 1
+            val w = decodeBounds.outWidth
+            val h = decodeBounds.outHeight
+            val target = 128
+            while (w / sample > target * 2 || h / sample > target * 2) sample *= 2
+            decodeOpts.inSampleSize = sample
+            resolver.openInputStream(uri)?.use { input ->
+                BitmapFactory.decodeStream(input, null, decodeOpts)
+            }?.also { cache.put(uriString, it) }
+        }.getOrNull()
+    }
+}
+
 @Composable
 private fun Avatar(name: String, color: Color, size: Dp, avatarUri: String? = null, modifier: Modifier = Modifier) {
     Box(modifier.size(size).clip(CircleShape).background(color), contentAlignment = Alignment.Center) {
-        if (avatarUri == null) Text(name.take(1), color = Color.White, fontWeight = FontWeight.Bold)
-        else AndroidView(factory = { context -> ImageView(context).apply { scaleType = ImageView.ScaleType.CENTER_CROP } }, update = { imageView -> imageView.setImageURI(Uri.parse(avatarUri)) }, modifier = Modifier.fillMaxSize())
+        if (avatarUri == null) {
+            Text(name.take(1), color = Color.White, fontWeight = FontWeight.Bold)
+        } else {
+            val context = LocalContext.current
+            val bitmap = remember(avatarUri) { AvatarBitmapCache.load(context, avatarUri) }
+            if (bitmap != null) {
+                Image(
+                    bitmap = bitmap.asImageBitmap(),
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Text(name.take(1), color = Color.White, fontWeight = FontWeight.Bold)
+            }
+        }
     }
 }
 

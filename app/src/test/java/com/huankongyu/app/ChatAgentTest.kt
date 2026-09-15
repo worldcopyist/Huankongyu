@@ -117,4 +117,31 @@ class ChatAgentTest {
         val segments = splitAssistantReply("嗯，我在。", ReplySplitterSettings())
         assertEquals(1, segments.size)
     }
+
+    @Test
+    fun splitterDropsLiteralNullSegments() {
+        val segments = splitAssistantReply("null\n\nnull\n\n你好", ReplySplitterSettings())
+        assertEquals(listOf("你好"), segments)
+    }
+
+    @Test
+    fun deviceToolsParseCallsFromJson() {
+        val calls = DeviceTools.parseCalls(
+            """[{"name":"device_get_location","arguments":{}},{"name":"evil","arguments":{}}]"""
+        )
+        assertEquals(1, calls.size)
+        assertEquals("device_get_location", calls.first().name)
+        assertTrue(DeviceTools.parseCalls("null").isEmpty())
+        assertTrue(DeviceTools.parseCalls(null).isEmpty())
+    }
+
+    @Test
+    fun planParserReadsDeviceToolCalls() {
+        val plan = ChatAgent.parseChatPlan(
+            """{"should_reply":true,"reply_focus":"x","reply_strategy":"y","target_length":"short","device_tool_calls":[{"name":"device_get_battery","arguments":{}}]}"""
+        )
+        assertNotNull(plan)
+        assertEquals(1, plan!!.deviceToolCalls.size)
+        assertEquals("device_get_battery", plan.deviceToolCalls.first().name)
+    }
 }

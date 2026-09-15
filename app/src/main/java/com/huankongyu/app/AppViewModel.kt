@@ -145,8 +145,53 @@ class AppViewModel : ViewModel() {
 
     fun closeMemoryDetails() {
         selectedMemoryScope = null
-        destination = Destination.Home
-        selectedTab = HomeTab.Memories
+        destination = Destination.Memories
+    }
+
+    fun openMemoriesPage() {
+        destination = Destination.Memories
+    }
+
+    /**
+     * Overlay on Home — not a Destination — so Scaffold/dock stay mounted
+     * and enter/exit can match the swipe pager without a hard cut.
+     */
+    var userProfileVisible by mutableStateOf(false)
+        private set
+
+    var profileEnterFromSwipe by mutableStateOf(false)
+        private set
+
+    fun openUserProfile(fromSwipe: Boolean = false) {
+        profileEnterFromSwipe = fromSwipe
+        userProfileVisible = true
+    }
+
+    fun closeUserProfile() {
+        userProfileVisible = false
+    }
+
+    fun setCharacterStreamingEnabled(characterId: String, enabled: Boolean) {
+        val index = characters.indexOfFirst { it.id == characterId }
+        if (index < 0) return
+        val updated = characters[index].copy(streamingEnabled = enabled)
+        characters[index] = updated
+        persistCharacters()
+        recordLog("${updated.name} 流式输出已${if (enabled) "开启" else "关闭"}")
+    }
+
+    fun setCharacterMemoryEnabled(characterId: String, enabled: Boolean) {
+        val index = characters.indexOfFirst { it.id == characterId }
+        if (index < 0) return
+        val updated = characters[index].copy(memoryEnabled = enabled)
+        characters[index] = updated
+        persistCharacters()
+        if (!enabled) {
+            memorySummaryJobs.remove(characterId)?.cancel()
+        } else {
+            scheduleMemoryConsolidation(characterId)
+        }
+        recordLog("${updated.name} 长期记忆已${if (enabled) "开启" else "关闭"}")
     }
 
     fun openMemoryVector() {
@@ -451,7 +496,7 @@ class AppViewModel : ViewModel() {
         // Cancel any in-flight plan/reply so a new message always wins (A2).
         chatJob?.cancel()
         isChatResponding = true
-        chatStatus = "正在规划回应…"
+        chatStatus = "思考中…"
         chatError = null
         chatStreamingText = null
         val plannerPrompt = globalChatPrompt
@@ -484,7 +529,9 @@ class AppViewModel : ViewModel() {
                 } else {
                     val webSearchContext = plan.webSearchQuery?.let { query ->
                         stage = "网络查询"
-                        withContext(Dispatchers.Main) { chatStatus = "正在查询网页…" }
+                        withContext(Dispatchers.Main) {
+                            chatStatus = "搜索中：${query.take(24)}"
+                        }
                         recordLog("规划器请求网页查询")
                         runCatching { WebSearchClient.search(query) }.fold(
                             onSuccess = { response ->
@@ -500,7 +547,9 @@ class AppViewModel : ViewModel() {
                     }
                     val mcpToolContext = plan.mcpToolCall?.let { call ->
                         stage = "MCP 工具调用"
-                        withContext(Dispatchers.Main) { chatStatus = "正在调用外部工具…" }
+                        withContext(Dispatchers.Main) {
+                            chatStatus = "调用工具：${call.toolName}"
+                        }
                         val server = enabledMcpServers.firstOrNull { it.id == call.serverId }
                         if (server == null || server.tools.none { it.name == call.toolName }) {
                             recordLog("MCP 工具调用被拒绝：服务器或工具未启用", AppLogLevel.Warning)
@@ -520,7 +569,44 @@ class AppViewModel : ViewModel() {
                             )
                         }
                     }
-                    val coreMemories = withContext(Dispatchers.Main) { coreMemoriesFor(characterId) }
+                    val deviceToolContext = if (plan.deviceToolCalls.isNotEmpty()) {
+                        stage = "设备工具"
+                        withContext(Dispatchers.Main) {
+                            chatStatus = "调用设备：${plan.deviceToolCalls.joinToString("、") { it.name.removePrefix("device_") }}"
+                        }
+                        val ctx = appContext
+                        if (ctx == null) {
+                            "设备工具未能执行：应用上下文不可用。"
+                        } else {
+                            val lines = buildList {
+                                for (call in plan.deviceToolCalls) {
+                                    // Help weather: pass the raw user turn so the tool can
+                                    // extract a city name even if the planner omitted it.
+                                    val args = if (call.name == "device_get_weather") {
+                                        runCatching {
+                                            val obj = org.json.JSONObject(call.argumentsJson.ifBlank { "{}" })
+                                            if (!obj.has("user_message")) obj.put("user_message", value)
+                                            obj.toString()
+                                        }.getOrDefault(call.argumentsJson)
+                                    } else {
+                                        call.argumentsJson
+                                    }
+                                    recordLog("调用设备工具：${call.name}")
+                                    val out = DeviceTools.execute(ctx, call.copy(argumentsJson = args))
+                                    add("「${call.name}」→ $out")
+                                }
+                            }
+                            recordLog("设备工具执行完成：${plan.deviceToolCalls.size} 个")
+                            lines.joinToString("\n")
+                        }
+                    } else {
+                        null
+                    }
+                    // Character-scoped memory is optional; global core profile still applies.
+                    val memoryEnabled = character.memoryEnabled
+                    val coreMemories = withContext(Dispatchers.Main) {
+                        if (memoryEnabled) coreMemoriesFor(characterId) else emptyList()
+                    }
                     val globalCoreMemories = coreMemories.filter { it.characterId == GLOBAL_MEMORY_SCOPE }
                     val roleCoreMemories = coreMemories.filter { it.characterId == characterId }
                     val globalCoreMemoryContext =
@@ -528,10 +614,10 @@ class AppViewModel : ViewModel() {
                     if (globalCoreMemories.isNotEmpty()) {
                         recordLog("已将 ${globalCoreMemories.size} 条用户全局核心档案注入回复上下文")
                     }
-                    val memoryRequested = plan.shouldReadMemory || likelyNeedsMemory(value)
+                    val memoryRequested = memoryEnabled && (plan.shouldReadMemory || likelyNeedsMemory(value))
                     val memoryContext = if (memoryRequested) {
                         stage = "记忆读取"
-                        withContext(Dispatchers.Main) { chatStatus = "正在读取相关记忆…" }
+                        withContext(Dispatchers.Main) { chatStatus = "回忆中…" }
                         recordLog("规划器请求读取长期记忆")
                         runCatching {
                             retrieveRelevantMemories(provider, selectedModels.embedding, characterId, value)
@@ -561,20 +647,30 @@ class AppViewModel : ViewModel() {
                         roleCoreMemories.takeIf { it.isNotEmpty() }?.let(::formatMemoryContext)
                     }
                     stage = "回复生成"
+                    val useStreaming = character.streamingEnabled
                     withContext(Dispatchers.Main) {
-                        chatStatus = "正在生成回复…"
-                        chatStreamingText = ""
+                        chatStatus = "正在说话…"
+                        chatStreamingText = if (useStreaming) "" else null
                     }
-                    recordLog("开始生成角色回复（流式）")
+                    recordLog(if (useStreaming) "开始生成角色回复（流式）" else "开始生成角色回复（非流式）")
                     Result.success(
-                        requestChatReplyStream(
-                            provider, chatModel, character, conversation, userName, deviceContext, plan,
-                            activeSplitterSettings, webSearchContext, mcpToolContext, globalCoreMemoryContext, memoryContext
-                        ) { chunk ->
-                            // Frequent main-thread posts keep the bubble in sync with SSE.
-                            providerScope.launch(Dispatchers.Main) {
-                                chatStreamingText = (chatStreamingText.orEmpty() + chunk)
+                        if (useStreaming) {
+                            requestChatReplyStream(
+                                provider, chatModel, character, conversation, userName, deviceContext, plan,
+                                activeSplitterSettings, webSearchContext, mcpToolContext, deviceToolContext,
+                                globalCoreMemoryContext, memoryContext
+                            ) { chunk ->
+                                // Frequent main-thread posts keep the bubble in sync with SSE.
+                                providerScope.launch(Dispatchers.Main) {
+                                    chatStreamingText = (chatStreamingText.orEmpty() + chunk)
+                                }
                             }
+                        } else {
+                            requestChatReply(
+                                provider, chatModel, character, conversation, userName, deviceContext, plan,
+                                activeSplitterSettings, webSearchContext, mcpToolContext,
+                                globalCoreMemoryContext, memoryContext, deviceToolContext
+                            )
                         }
                     )
                 }
@@ -793,9 +889,16 @@ class AppViewModel : ViewModel() {
     fun isRemoteChatReady(): Boolean = activeProvider() != null && !selectedModels.chat.isNullOrBlank()
 
     private fun appendAssistantReply(characterId: String, reply: String) {
-        val message = ChatMessage(fromUser = false, content = reply)
+        val content = reply.trim()
+        // Never post empty or literal “null” bubbles left over from SSE parsing.
+        if (content.isEmpty() || content.equals("null", ignoreCase = true) ||
+            content.equals("undefined", ignoreCase = true)
+        ) {
+            return
+        }
+        val message = ChatMessage(fromUser = false, content = content)
         messagesFor(characterId).add(message)
-        updateConversationPreview(characterId, reply)
+        updateConversationPreview(characterId, content)
         persistAppendedMessage(characterId, message)
         scheduleMemoryConsolidation(characterId)
     }
@@ -962,6 +1065,12 @@ class AppViewModel : ViewModel() {
         selectedModels = selectedModels.withModel(type, model)
         persistProviderConfiguration()
         recordLog("已选择${type.label}：$model")
+    }
+
+    fun setAllowModelWebSearch(enabled: Boolean) {
+        selectedModels = selectedModels.copy(allowModelWebSearch = enabled)
+        persistProviderConfiguration()
+        recordLog(if (enabled) "已允许模型使用自带联网搜索" else "已关闭模型自带联网搜索")
     }
 
     fun validateModelName(providerId: String, rawModel: String) {
@@ -1286,6 +1395,8 @@ class AppViewModel : ViewModel() {
     /** Schedules a role-scoped, durable memory summary after the conversation is quiet for three minutes. */
     private fun scheduleMemoryConsolidation(characterId: String) {
         memorySummaryJobs.remove(characterId)?.cancel()
+        val character = characters.firstOrNull { it.id == characterId } ?: return
+        if (!character.memoryEnabled) return
         val latestActivity = messagesFor(characterId).maxOfOrNull { it.createdAt } ?: return
         if (latestActivity <= 0L) return
         val waitMillis = (latestActivity + MEMORY_IDLE_MILLIS - System.currentTimeMillis()).coerceAtLeast(0L)
@@ -1598,6 +1709,25 @@ $conversationJson
         return parseChatPlanWithFallback(provider, model, messages)
     }
 
+    private fun parseChatPlanWithFallback(
+        provider: ApiProvider,
+        model: String,
+        messages: JSONArray
+    ): ChatPlan {
+        val web = selectedModels.allowModelWebSearch
+        val raw = runCatching {
+            OpenAiClient.requestCompletion(provider, model, messages, plannerSampling(web))
+        }.getOrElse { throw it }
+        val first = ChatAgent.parseChatPlan(raw)
+        if (first != null) return first
+        recordLog("规划器 JSON 解析失败，重试一次", AppLogLevel.Warning)
+        val retryRaw = OpenAiClient.requestCompletion(provider, model, messages, plannerSampling(web))
+        val second = ChatAgent.parseChatPlan(retryRaw)
+        if (second != null) return second
+        recordLog("规划器输出仍无法解析，降级为直接回复", AppLogLevel.Warning)
+        return ChatAgent.defaultDirectPlan()
+    }
+
     /** Keeps recent history under a character budget for the reply stage. */
     private fun trimConversationForReply(
         conversation: List<ChatMessage>,
@@ -1636,20 +1766,6 @@ $conversationJson
         mcpToolCall = null
     )
 
-    /** Retries once on malformed plan JSON; falls back to a safe direct-reply plan. */
-    private fun parseChatPlanWithFallback(provider: ApiProvider, model: String, messages: JSONArray): ChatPlan {
-        val raw = runCatching { OpenAiClient.requestCompletion(provider, model, messages, plannerSampling()) }
-            .getOrElse { throw it }
-        val first = ChatAgent.parseChatPlan(raw)
-        if (first != null) return first
-        recordLog("规划器 JSON 解析失败，重试一次", AppLogLevel.Warning)
-        val retryRaw = OpenAiClient.requestCompletion(provider, model, messages, plannerSampling())
-        val second = ChatAgent.parseChatPlan(retryRaw)
-        if (second != null) return second
-        recordLog("规划器输出仍无法解析，降级为直接回复", AppLogLevel.Warning)
-        return ChatAgent.defaultDirectPlan()
-    }
-
     private fun requestChatReply(
         provider: ApiProvider,
         model: String,
@@ -1662,13 +1778,14 @@ $conversationJson
         webSearchContext: String?,
         mcpToolContext: String?,
         globalCoreMemoryContext: String?,
-        memoryContext: String?
+        memoryContext: String?,
+        deviceToolContext: String? = null
     ): String {
         val messages = buildReplyMessages(
             character, conversation, userName, deviceContext, plan, splitterSettings,
-            webSearchContext, mcpToolContext, globalCoreMemoryContext, memoryContext
+            webSearchContext, mcpToolContext, deviceToolContext, globalCoreMemoryContext, memoryContext
         )
-        return OpenAiClient.requestCompletion(provider, model, messages, replySampling())
+        return OpenAiClient.requestCompletion(provider, model, messages, replySampling(selectedModels.allowModelWebSearch))
     }
 
     private fun requestChatReplyStream(
@@ -1682,15 +1799,18 @@ $conversationJson
         splitterSettings: ReplySplitterSettings,
         webSearchContext: String?,
         mcpToolContext: String?,
+        deviceToolContext: String?,
         globalCoreMemoryContext: String?,
         memoryContext: String?,
         onDelta: (String) -> Unit
     ): String {
         val messages = buildReplyMessages(
             character, conversation, userName, deviceContext, plan, splitterSettings,
-            webSearchContext, mcpToolContext, globalCoreMemoryContext, memoryContext
+            webSearchContext, mcpToolContext, deviceToolContext, globalCoreMemoryContext, memoryContext
         )
-        return OpenAiClient.requestCompletionStream(provider, model, messages, replySampling(), onDelta)
+        return OpenAiClient.requestCompletionStream(
+            provider, model, messages, replySampling(selectedModels.allowModelWebSearch), onDelta
+        )
     }
 
     private fun buildReplyMessages(
@@ -1702,6 +1822,7 @@ $conversationJson
         splitterSettings: ReplySplitterSettings,
         webSearchContext: String?,
         mcpToolContext: String?,
+        deviceToolContext: String?,
         globalCoreMemoryContext: String?,
         memoryContext: String?
     ): JSONArray = JSONArray().apply {
@@ -1711,7 +1832,7 @@ $conversationJson
                 "content",
                 buildChatReplySystemPrompt(
                     character, userName, deviceContext, plan, splitterSettings,
-                    webSearchContext, mcpToolContext, globalCoreMemoryContext, memoryContext
+                    webSearchContext, mcpToolContext, deviceToolContext, globalCoreMemoryContext, memoryContext
                 )
             )
         })
@@ -1736,7 +1857,16 @@ $conversationJson
     private fun friendlyWebSearchError(error: Throwable): String = when (error) {
         is SocketTimeoutException, is ConnectException -> "搜索服务连接超时，请检查网络后重试"
         is UnknownHostException -> "无法解析搜索服务地址，请检查网络或 DNS"
-        else -> error.message?.take(120)?.ifBlank { null } ?: "暂时无法获取网页结果"
+        else -> {
+            val msg = error.message?.take(160).orEmpty()
+            when {
+                msg.contains("验证码", ignoreCase = true) ->
+                    "搜索页要求验证码，暂时无法自动查询。可稍后重试，或让我根据已有知识回答。"
+                msg.contains("HTTP 4") || msg.contains("HTTP 5") ->
+                    "搜索服务返回错误：$msg"
+                else -> "网页查询未成功：$msg".ifBlank { "暂时无法获取网页结果" }
+            }
+        }
     }
 
     private fun friendlyMcpError(error: Throwable): String = when (error) {

@@ -6,7 +6,7 @@ import java.time.format.DateTimeFormatter
 import java.util.UUID
 
 enum class Destination {
-    Home, Chat, CreateCharacter, EditCharacter, CharacterSettings, AvatarCrop, GlobalPrompt, ReplySplitter, ThemeMode, Providers, McpServers, Logs, MemoryDetails, MemoryVector, Shizuku
+    Home, Chat, CreateCharacter, EditCharacter, CharacterSettings, AvatarCrop, GlobalPrompt, ReplySplitter, ThemeMode, Providers, McpServers, Logs, MemoryDetails, MemoryVector, Shizuku, Memories
 }
 
 enum class HomeTab { Chats, Contacts, Me, Memories }
@@ -75,7 +75,11 @@ data class Character(
     val replyStyle: String = "",
     val avatarUri: String? = null,
     /** Few-shot samples: lines like "用户：…\n角色：…" to anchor voice (B1). */
-    val exampleDialogues: String = ""
+    val exampleDialogues: String = "",
+    /** Per-character SSE streaming for replies. Default on. */
+    val streamingEnabled: Boolean = true,
+    /** Whether this character writes/retrieves long-term memory. Default on. */
+    val memoryEnabled: Boolean = true
 )
 
 /** Circular crop request. [characterId] is null when cropping the user avatar. */
@@ -137,7 +141,9 @@ data class ChatPlan(
     val shouldReadMemory: Boolean = false,
     /** A concise query requested by the planner for the app-owned web_search tool. */
     val webSearchQuery: String? = null,
-    val mcpToolCall: McpToolCall? = null
+    val mcpToolCall: McpToolCall? = null,
+    /** App-owned device tools (GPS / battery / cameras / device info). */
+    val deviceToolCalls: List<DeviceToolCall> = emptyList()
 )
 
 data class WebSearchResult(val title: String, val url: String, val snippet: String)
@@ -311,7 +317,13 @@ data class SelectedModels(
     val chat: String? = null,
     val embedding: String? = null,
     val vision: String? = null,
-    val voice: String? = null
+    val voice: String? = null,
+    /**
+     * When true, chat completions may include provider-native web search
+     * (`web_search_options`) so the model can browse on its own, in addition
+     * to the app-owned web_search tool.
+     */
+    val allowModelWebSearch: Boolean = false
 ) {
     fun modelFor(type: ModelType): String? = when (type) {
         ModelType.Chat -> chat

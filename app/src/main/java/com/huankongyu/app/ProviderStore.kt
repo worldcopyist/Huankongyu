@@ -61,7 +61,8 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
                 chat_model TEXT,
                 embedding_model TEXT,
                 vision_model TEXT,
-                voice_model TEXT
+                voice_model TEXT,
+                allow_model_web_search INTEGER NOT NULL DEFAULT 0
             )
             """.trimIndent()
         )
@@ -125,6 +126,15 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
         if (oldVersion < 16) {
             database.execSQL("ALTER TABLE characters ADD COLUMN example_dialogues TEXT NOT NULL DEFAULT ''")
         }
+        if (oldVersion < 17) {
+            database.execSQL("ALTER TABLE provider_settings ADD COLUMN allow_model_web_search INTEGER NOT NULL DEFAULT 0")
+        }
+        if (oldVersion < 18) {
+            database.execSQL("ALTER TABLE characters ADD COLUMN streaming_enabled INTEGER NOT NULL DEFAULT 1")
+        }
+        if (oldVersion < 19) {
+            database.execSQL("ALTER TABLE characters ADD COLUMN memory_enabled INTEGER NOT NULL DEFAULT 1")
+        }
     }
 
     fun load(): PersistedProviderConfiguration {
@@ -152,7 +162,10 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
         var selectedModels = SelectedModels()
         readableDatabase.query(
             "provider_settings",
-            arrayOf("active_provider_id", "chat_model", "embedding_model", "vision_model", "voice_model"),
+            arrayOf(
+                "active_provider_id", "chat_model", "embedding_model", "vision_model", "voice_model",
+                "allow_model_web_search"
+            ),
             "settings_id = 1", null, null, null, null
         ).use { cursor ->
             if (cursor.moveToFirst()) {
@@ -161,7 +174,8 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
                     chat = cursor.getStringOrNull(1),
                     embedding = cursor.getStringOrNull(2),
                     vision = cursor.getStringOrNull(3),
-                    voice = cursor.getStringOrNull(4)
+                    voice = cursor.getStringOrNull(4),
+                    allowModelWebSearch = cursor.getInt(5) == 1
                 )
             }
         }
@@ -200,7 +214,7 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
         }
         val characters = mutableListOf<Character>()
         readableDatabase.query(
-            "characters", arrayOf("id", "name", "relationship", "trait", "identity", "behavior_style", "reply_style", "avatar_uri", "color_value", "preview", "message_time", "pinned", "example_dialogues"),
+            "characters", arrayOf("id", "name", "relationship", "trait", "identity", "behavior_style", "reply_style", "avatar_uri", "color_value", "preview", "message_time", "pinned", "example_dialogues", "streaming_enabled", "memory_enabled"),
             null, null, null, null, "sort_order ASC"
         ).use { cursor ->
             while (cursor.moveToNext()) {
@@ -217,7 +231,9 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
                     behaviorStyle = cursor.getString(5),
                     replyStyle = cursor.getString(6),
                     avatarUri = cursor.getStringOrNull(7),
-                    exampleDialogues = cursor.getStringOrNull(12).orEmpty()
+                    exampleDialogues = cursor.getStringOrNull(12).orEmpty(),
+                    streamingEnabled = cursor.getInt(13) != 0,
+                    memoryEnabled = cursor.getInt(14) != 0
                 )
             }
         }
@@ -288,6 +304,7 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
                 put("embedding_model", selectedModels.embedding)
                 put("vision_model", selectedModels.vision)
                 put("voice_model", selectedModels.voice)
+                put("allow_model_web_search", if (selectedModels.allowModelWebSearch) 1 else 0)
             }, SQLiteDatabase.CONFLICT_REPLACE)
             writableDatabase.setTransactionSuccessful()
         } finally {
@@ -347,6 +364,8 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
                     put("behavior_style", character.behaviorStyle)
                     put("reply_style", character.replyStyle)
                     put("example_dialogues", character.exampleDialogues)
+                    put("streaming_enabled", if (character.streamingEnabled) 1 else 0)
+                    put("memory_enabled", if (character.memoryEnabled) 1 else 0)
                     put("avatar_uri", character.avatarUri)
                     put("color_value", character.color.toArgb())
                     put("preview", character.preview)
@@ -556,6 +575,8 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
                 behavior_style TEXT NOT NULL DEFAULT '',
                 reply_style TEXT NOT NULL DEFAULT '',
                 example_dialogues TEXT NOT NULL DEFAULT '',
+                streaming_enabled INTEGER NOT NULL DEFAULT 1,
+                memory_enabled INTEGER NOT NULL DEFAULT 1,
                 avatar_uri TEXT,
                 color_value INTEGER NOT NULL,
                 preview TEXT NOT NULL,
@@ -593,7 +614,7 @@ class ProviderStore(context: Context) : SQLiteOpenHelper(context.applicationCont
 
     private companion object {
         const val DATABASE_NAME = "huankongyu.db"
-        const val DATABASE_VERSION = 16
+        const val DATABASE_VERSION = 19
     }
 }
 

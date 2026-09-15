@@ -28,7 +28,12 @@ internal object ChatAgent {
         val value = userMessage.trim()
         if (value.isEmpty() || value.length > 48) return false
         if (value.contains('?') || value.contains('？')) return false
-        val probe = listOf("查", "搜", "帮我", "天气", "新闻", "日历", "日程", "搜索")
+        val probe = listOf(
+            "查", "搜", "帮我", "天气", "新闻", "日历", "日程", "搜索",
+            // Device tools must go through the planner so they can be requested.
+            "在哪", "位置", "定位", "坐标", "附近", "电量", "电", "摄像头", "相机", "拍照", "机型", "手机型号",
+            "气温", "下雨", "刮风", "湿度"
+        )
         if (probe.any { value.contains(it) }) return false
         return true
     }
@@ -85,7 +90,13 @@ internal object ChatAgent {
             if (serverId.isBlank() || name.isBlank() || arguments == null) null
             else McpToolCall(serverId, name, arguments.toString())
         }
-        return ChatPlan(shouldReply, focus, strategy, length, shouldReadMemory, webSearchQuery, call)
+        val deviceCalls = DeviceTools.parseCalls(
+            json.optJSONArray("device_tool_calls")?.toString()
+                ?: json.optString("device_tool_calls").takeIf { it.isNotBlank() && it != "null" }
+        )
+        return ChatPlan(
+            shouldReply, focus, strategy, length, shouldReadMemory, webSearchQuery, call, deviceCalls
+        )
     }
 
     /**
